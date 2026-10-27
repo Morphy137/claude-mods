@@ -1,0 +1,12 @@
+{
+  "name": "morphy-mods",
+  "description": "Claude Code mods by Morphy137",
+  "owner": { "name": "Morphy137", "url": "https://github.com/Morphy137" },
+  "plugins": [
+    {
+      "name": "agent-dashboard",
+      "source": "./agent-dashboard",
+      "description": "Worker pane and animated mascot band showing running subagents, their files and estimated cost."
+    }
+  ]
+}

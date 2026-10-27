@@ -1,0 +1,7 @@
+{
+  "name": "agent-dashboard",
+  "version": "0.1.0",
+  "author": { "name": "Morphy137", "url": "https://github.com/Morphy137" },
+  "description": "Worker pane and animated mascot band showing running subagents, their files and estimated cost.",
+  "types": "./types/index.d.ts"
+}
