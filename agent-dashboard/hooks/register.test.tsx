@@ -110,7 +110,8 @@ test('the pane shows the orchestrator card on every surface', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: new RegExp(MAIN) })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeUndefined()
+    // The role line is part of every card, not a detail.
+    expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeTruthy()
     await openDetails(ui, 'main')
     expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: new RegExp(`${MAIN} main`) })).toBeUndefined()
@@ -471,21 +472,22 @@ test('History starts with sub-agents collapsed and keeps its own toggle state', 
   await ui.unmount()
 })
 
-test('cards are compact until their arrow is pressed', async ($, on) => {
+test('cards always show who and what; the arrow adds only the extras', async ($, on) => {
   await startWithAgents($, on, NESTED_AGENTS.slice(0, 1))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const compact = /^≈\$0\.00 · \d+[smhd]/
   const STATUS_LINE = /→.*→.*→/
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(0)
+  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(2)
   expect(await textsOf(ui, / tools/)).toHaveLength(0)
   expect(await textsOf(ui, compact)).toHaveLength(2)
   expect(await ui.find({ type: 'Button', text: /^▸$/ })).toBeTruthy()
   await ui.press({ key: 'detail:a1' })
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(1)
+  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(2)
+  expect(await textsOf(ui, / tools/)).toHaveLength(1)
   expect(await textsOf(ui, compact)).toHaveLength(1)
   await ui.press({ key: 'detail:a1' })
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(0)
+  expect(await textsOf(ui, / tools/)).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -800,7 +802,8 @@ test('a resumed session is seeded from its own snapshot, with the orchestrator i
   expect(await ui.find({ type: 'Text', text: /live task/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /vanished task/ })).toBeTruthy()
   await openDetails(ui, 'main')
-  expect(await textsOf(ui, /^Running$/)).toHaveLength(0)
+  // Only the two restored workers run; the main agent waits on them.
+  expect(await textsOf(ui, /^Running$/)).toHaveLength(2)
   expect(await textsOf(ui, /^Waiting$/)).toHaveLength(1)
   // The main card carries the session total: its own $2 and its workers' $0.75.
   expect((await textsOf(ui, /≈\$2\.75/)).length).toBeGreaterThan(0)

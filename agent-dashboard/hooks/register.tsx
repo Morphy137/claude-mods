@@ -31,6 +31,7 @@ import {
   SYNC_MS,
   endedSnapshot,
   finishVanished,
+  customTitleOf,
   firstPrompt,
   historyEntries,
   isFileRecent,
@@ -40,6 +41,7 @@ import {
   parseSnapshotText,
   pastSessionGroups,
   pastSessionRoot,
+  projectFolderName,
   promptTitle,
   restoredOrchestrator,
   restoredTitle,
@@ -92,6 +94,8 @@ const BAND_MARGIN_PX = 24
 const MIN_SURFACE_PX = 240
 const MIN_BAR_PX = 120
 const AVATAR_PX = 56
+// Progress bars keep one small width: the pane's width is not known reliably while it is resized.
+const BAR_PX = 96
 // Cells the band caption row keeps clear at its right end: the worker mascot's width.
 const BAND_MASCOT_CELLS = Math.ceil(MASCOT_W / CELL_PX)
 const CARD_GAP_PX = 12
@@ -103,12 +107,10 @@ const IDLE_TICK_MS = 5000
 const IDLE_CLOCK_MS = 60_000
 // Other sessions' files change rarely; the history rereads them this often.
 const HISTORY_REFRESH_MS = 5 * 60_000
-// A cheap model names the session once, the way the desktop app titles it.
-const TITLE_MODEL = 'haiku'
-const TITLE_PROMPT_CHARS = 800
-const TITLE_MAX_TOKENS = 24
-const TITLE_INSTRUCTION =
-  'Give this request a title of 2 to 5 words, in the language it is written in. Reply with the title only, no quotes.'
+// The transcript (often megabytes) is read for the app's session name every 30 s until
+// it has one, then every 5 min to catch a rename.
+const TITLE_REFRESH_MS = 30_000
+const TITLE_RENAME_MS = 5 * 60_000
 const MAX_WORKERS = 60
 const TOKENS_PER_M = 1_000_000
 const CACHE_READ_RATE = 0.1
@@ -442,14 +444,21 @@ type SyncControls = {
 
 /** `<claude config dir>/agent-dashboard/sessions`; the config dir is CLAUDE_CONFIG_DIR, else `~/.claude`. */
 async function sessionsDirectory($: SyncControls): Promise<string | undefined> {
+  const config = await configDirectory($)
+
+  return config ? `${config}/${SESSIONS_SUBDIR}` : undefined
+}
+
+/** CLAUDE_CONFIG_DIR, else `~/.claude`. */
+async function configDirectory($: SyncControls): Promise<string | undefined> {
   const configured = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
   if (configured) {
-    return `${configured}/${SESSIONS_SUBDIR}`
+    return configured
   }
   const home =
     (await $.env.get('USERPROFILE').catch(() => undefined)) ?? (await $.env.get('HOME').catch(() => undefined))
 
-  return home ? `${home}/.claude/${SESSIONS_SUBDIR}` : undefined
+  return home ? `${home}/.claude` : undefined
 }
 
 type TranscriptControls = {
@@ -463,22 +472,34 @@ async function firstPromptOf($: TranscriptControls): Promise<string> {
   return Array.isArray(found) ? firstPrompt(found) : ''
 }
 
-type TitleControls = {
-  model: {
-    complete: (request: { model: string; prompt: string; maxTokens: number }) => Promise<{ isAnswered: boolean; text?: string }>
+type TitleSource = {
+  fs: {
+    read: (path: string) => Promise<unknown>
+    list: (path: string) => Promise<Array<{ name: string; kind: string }>>
+    exists: (path: string) => Promise<boolean>
   }
 }
 
-/** A few words naming the request, from a cheap model; '' when it gives none. */
-async function modelTitle($: TitleControls, prompt: string): Promise<string> {
-  const result = await $.model
-    .complete({ model: TITLE_MODEL, prompt: `${TITLE_INSTRUCTION}
+/**
+ * The session's transcript, `<config>/projects/<cwd as a folder name>/<id>.jsonl`.
+ * A session that changed folder keeps its transcript under the first one, so the
+ * other project folders are searched when the expected one has no file.
+ */
+async function findTranscript($: TitleSource, projects: string, cwd: string, sessionId: string): Promise<string | undefined> {
+  const file = `${sessionId}.jsonl`
+  const expected = `${projects}/${projectFolderName(cwd)}/${file}`
+  if (await $.fs.exists(expected).catch(() => false)) {
+    return expected
+  }
+  const folders = await $.fs.list(projects).catch(() => [])
+  for (const folder of folders.filter(entry => entry.kind === 'dir')) {
+    const path = `${projects}/${folder.name}/${file}`
+    if (await $.fs.exists(path).catch(() => false)) {
+      return path
+    }
+  }
 
-${clip(prompt, TITLE_PROMPT_CHARS)}`, maxTokens: TITLE_MAX_TOKENS })
-    .catch(() => null)
-  const text = result?.isAnswered ? (result.text ?? '') : ''
-
-  return promptTitle(text.replace(/["'`*#]/g, ''))
+  return undefined
 }
 
 type RestoreControls = StateDollar & {
@@ -628,6 +649,9 @@ export const register: Register = on => {
       let published = { sessionId: '', key: '', heartbeat: 0 }
       let othersPublishedAt = 0
       let historyLoadedAt = -HISTORY_REFRESH_MS
+      let titleCheckedAt = -TITLE_REFRESH_MS
+      let transcriptPath: string | undefined
+      let hasAppTitle = false
 
       // Publishes this session's snapshot, then reads the others'. Disk and atom
       // writes happen only when something changed (or a heartbeat is due).
@@ -647,13 +671,18 @@ export const register: Register = on => {
           await update($, currentSessionId, () => sessionId)
         }
         let title = knownTitle
-        if (title === '') {
-          const prompt = await firstPromptOf($)
-          title = promptTitle(prompt)
-          if (title !== '') {
-            await update($, sessionTitle, () => title)
-            // Asked once per session; the gist of the prompt stands in until the model answers.
-            void modelTitle($, prompt).then(named => (named ? update($, sessionTitle, () => named) : undefined))
+        if (stamp - titleCheckedAt >= (hasAppTitle ? TITLE_RENAME_MS : TITLE_REFRESH_MS)) {
+          titleCheckedAt = stamp
+          const config = await configDirectory($)
+          transcriptPath ??= config ? await findTranscript($, `${config}/projects`, cwd, sessionId) : undefined
+          const raw = transcriptPath ? await $.fs.read(transcriptPath).catch(() => '') : ''
+          // The app's own name for the session; the gist of the first prompt until it has one.
+          const appTitle = customTitleOf(typeof raw === 'string' ? raw : '')
+          hasAppTitle = appTitle !== ''
+          const named = appTitle || title || promptTitle(await firstPromptOf($))
+          if (named !== title) {
+            title = named
+            await update($, sessionTitle, () => named)
           }
         }
         const snapshot = buildSnapshot({
@@ -1070,11 +1099,11 @@ export const register: Register = on => {
         const isDetailed = detailIds.includes(worker.id)
         const files = worker.files.slice(-HISTORY_FILES).map(baseName).join(', ')
         const avatarPx = avatarPxAt(depth)
-        const cardBarWidth = contentWidth(indent, avatarPx)
+        const cardWidth = contentWidth(indent, avatarPx)
         const barColor = isFailed(worker) ? FAILED_BAR_COLOR : roleColor
         const titleChars = Math.min(
           TITLE_CHARS,
-          Math.max(MIN_TITLE_CHARS, Math.floor(cardBarWidth / CELL_PX) - name.length - TITLE_RESERVE_CELLS),
+          Math.max(MIN_TITLE_CHARS, Math.floor(cardWidth / CELL_PX) - name.length - TITLE_RESERVE_CELLS),
         )
         const trunkCells = trunkOffset(depth) + 1
 
@@ -1113,13 +1142,7 @@ export const register: Register = on => {
                   </Button>
                 </Box>
               </Box>
-              {!isDetailed && (
-                <Text dimColor>
-                  {money(worker.cost)} · {elapsed(worker, clockNow)}
-                </Text>
-              )}
-              {isDetailed && (
-                <Text>
+              <Text>
                   <Text bold color={roleColor}>
                     {role.category}
                   </Text>
@@ -1133,6 +1156,10 @@ export const register: Register = on => {
                   <Text color={readableColor(STATUS_COLORS[worker.status] ?? NEUTRAL_COLOR)}>
                     {statusLabel(worker.status)}
                   </Text>
+                </Text>
+              {!isDetailed && (
+                <Text dimColor>
+                  {money(worker.cost)} · {elapsed(worker, clockNow)}
                 </Text>
               )}
               {isDetailed && (
@@ -1150,9 +1177,9 @@ export const register: Register = on => {
               {Svg && (
                 <Box height={BAR_ROW_CELLS} flexShrink={0}>
                   <Svg
-                    source={barSvg(barColor, activity, cardBarWidth, progressElapsedMs(worker, clockNow))}
+                    source={barSvg(barColor, activity, BAR_PX, progressElapsedMs(worker, clockNow))}
                     alt={BAR_ALTS[activity]}
-                    width={barWidth(cardBarWidth)}
+                    width={barWidth(BAR_PX)}
                     height={BAR_ROW_HEIGHT}
                     isInteractive
                   />

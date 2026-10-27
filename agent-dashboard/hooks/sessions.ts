@@ -270,6 +270,29 @@ export function firstPrompt(messages: ReadonlyArray<{ role: string; text: string
   return first?.text.trim() ?? ''
 }
 
+// The desktop app (and /rename) records the session's name in its transcript as
+// {"type":"custom-title","customTitle":"..."}; the last such line is the current one.
+const CUSTOM_TITLE = /"type":"custom-title","customTitle":"((?:[^"\\]|\\.)*)"/g
+
+/** The session name the app shows, from its transcript text; '' when it has none. */
+export function customTitleOf(transcript: string): string {
+  const matches = [...transcript.matchAll(CUSTOM_TITLE)]
+  const last = matches[matches.length - 1]?.[1]
+  if (last === undefined) {
+    return ''
+  }
+  try {
+    return String(JSON.parse(`"${last}"`)).trim()
+  } catch {
+    return ''
+  }
+}
+
+/** The folder Claude Code keeps a project's transcripts in: its path with every non-alphanumeric as '-'. */
+export function projectFolderName(cwd: string): string {
+  return cwd.replace(/[^A-Za-z0-9]/g, '-')
+}
+
 /** What a session section is headed with: its title when known, else its directory's name. */
 export function sessionLabel(title: string, cwd: string): string {
   return title || labelFromCwd(cwd)
