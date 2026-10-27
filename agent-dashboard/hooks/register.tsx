@@ -987,13 +987,18 @@ export const register: Register = on => {
         </Box>
       )
 
-      const choose = (next: DashboardTab) => void update($, tab, () => next)
+      // A pressed tab leaves the pane's window parked on the tab row, which kept the stat
+      // tiles above it out of reach; switching tabs takes the window back to the top.
+      const choose = async (next: DashboardTab) => {
+        await update($, tab, () => next)
+        await $.ui.scroll({ in: PANE, to: 'start', block: 'start' }).catch(() => undefined)
+      }
       const tabButton = (id: DashboardTab, label: string, hotkey: string) => (
         <Button
           key={id}
           hotkey={hotkey}
           variant={activeTab === id ? 'primary' : 'secondary'}
-          onPress={() => choose(id)}
+          onPress={() => void choose(id)}
         >
           {label}
         </Button>
