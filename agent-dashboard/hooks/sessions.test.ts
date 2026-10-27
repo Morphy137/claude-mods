@@ -4,6 +4,8 @@ import type { ArchivedWorker, SessionSnapshot, Worker } from '../types'
 import { ORCHESTRATOR_ID, newOrchestrator } from './orchestrator'
 import { ORCHESTRATOR_ROLE_ID } from './roles'
 import {
+  customTitleOf,
+  projectFolderName,
   EARLIER_SESSIONS_LABEL,
   HEARTBEAT_MS,
   MAX_REMOTE_SESSIONS,
@@ -323,4 +325,17 @@ test('a worker that started after the restore is never finished by it', () => {
   const fresh = restorable('new', 'running')
 
   expect(finishVanished([fresh], new Map(), new Set())).toEqual([fresh])
+})
+
+test('the app session name is the last custom-title line of the transcript', () => {
+  const line = (title: string) => JSON.stringify({ type: 'custom-title', customTitle: title, sessionId: 's' })
+  const transcript = [line('First name'), '{"type":"user","message":"hi"}', line('Tres sub agentes con "espera"')].join('\n')
+
+  expect(customTitleOf(transcript)).toBe('Tres sub agentes con "espera"')
+  expect(customTitleOf('{"type":"user"}')).toBe('')
+})
+
+test('a project folder name is the path with every non-alphanumeric as a dash', () => {
+  expect(projectFolderName('C:\\Users\\Morphy\\claude-mods')).toBe('C--Users-Morphy-claude-mods')
+  expect(projectFolderName('/home/me/app')).toBe('-home-me-app')
 })

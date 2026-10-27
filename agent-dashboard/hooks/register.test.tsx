@@ -2,7 +2,15 @@ import type { AgentInfo, On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { ORCHESTRATOR_ROLE_ID, ROLES, agentName } from './roles'
 import { SYNC_MS } from './sessions'
+
+// Agent names come from each role's pool, picked by the agent's id; the main agent's
+// seed is the session id, which these tests leave unanswered ('').
+const ROLE_NAMES = new RegExp(`^(${ROLES.flatMap(role => role.names).join('|')})$`)
+const MAIN = agentName(ORCHESTRATOR_ROLE_ID, '')
+const INSPECTOR = agentName('inspector', 'a1')
+const WRITER = agentName('scribe', 'a2')
 
 const CLOCK_START = 1_000_000
 const TICK_MS = 1000
@@ -56,7 +64,12 @@ test('a refused command name does not stop agents from being tracked', async ($,
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(TICK_MS)
 
-  expect(JSON.stringify(stored)).toContain('finished task')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'history' })
+  await ui.press({ key: 'children:history:main' })
+  expect(await ui.find({ type: 'Text', text: / finished task/ })).toBeTruthy()
+  expect(stored).toHaveLength(0)
+  await ui.unmount()
 })
 
 test('/agent-dashboard opens the pane when closed and closes it when open', async ($, on) => {
@@ -96,11 +109,12 @@ test('the pane shows the orchestrator card on every surface', async ($, on) => {
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await ui.find({ type: 'Text', text: /Claude/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(MAIN) })).toBeTruthy()
+    // The role line is part of every card, not a detail.
+    expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeTruthy()
     await openDetails(ui, 'main')
     expect(await ui.find({ type: 'Text', text: /Orchestrator/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /Claude main/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: new RegExp(`${MAIN} main`) })).toBeUndefined()
     await openDetails(ui, 'main')
     await ui.unmount()
   }
@@ -347,15 +361,16 @@ test('main-loop events update the orchestrator and park it when the turn ends', 
   await openDetails(busy, 'main')
   expect(await textsOf(busy, /^Running$/)).toHaveLength(1)
   expect((await textsOf(busy, /2 tools/))[0]).toContain('Read')
-  expect((await svgSources(busy)).join('')).toContain('type="rotate"')
+  // Busy, the main agent blinks; asleep, it closes its eyes.
+  expect((await svgSources(busy)).join('')).toContain('keyTimes="0;0.9;0.95;1"')
   await busy.unmount()
 
   await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer', usage: USAGE })
   const asleep = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await textsOf(asleep, /^Idle$/)).toHaveLength(1)
   expect(await textsOf(asleep, /^Running$/)).toHaveLength(0)
-  expect((await textsOf(asleep, /^2k · /))[0]).toContain(USAGE_COST)
-  expect((await svgSources(asleep)).join('')).not.toContain('type="rotate"')
+  expect((await textsOf(asleep, /^1\.5K · /))[0]).toContain(USAGE_COST)
+  expect((await svgSources(asleep)).join('')).toContain('height="0.4"')
   await asleep.unmount()
 })
 
@@ -402,14 +417,13 @@ const NESTED_AGENTS: AgentInfo[] = [
   { id: 'a1', description: 'review the diff', type: 'general-purpose', status: 'running' },
   { id: 'a2', description: 'write the docs', type: 'general-purpose', status: 'running', parentId: 'a1' },
 ]
-// Role names: Claude is the orchestrator, Iris the Inspector and Penny the Writer.
-const ROLE_NAMES = /^(Claude|Iris|Penny)$/
+
 
 test('the orchestrator is the root card and sub-agents nest under it', async ($, on) => {
   await startWithAgents($, on, NESTED_AGENTS)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await openDetails(ui, 'main', 'a1')
   expect(await ui.find({ type: 'Text', text: /incl\. sub-agents/ })).toBeTruthy()
   await ui.unmount()
@@ -435,12 +449,12 @@ test('sub-agents are shown on the Running tab and can be hidden with their toggl
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.findAll({ type: 'Button', text: /▾ 1 sub-agent/ })).toHaveLength(2)
   await ui.press({ key: 'children:running:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN])
   expect(await ui.find({ type: 'Button', text: /▸ 1 sub-agent/ })).toBeTruthy()
   await ui.press({ key: 'children:running:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.press({ key: 'children:running:a1' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR])
   await ui.unmount()
 })
 
@@ -449,30 +463,31 @@ test('History starts with sub-agents collapsed and keeps its own toggle state', 
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'history' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN])
   expect(await ui.find({ type: 'Button', text: /▸ 1 sub-agent/ })).toBeTruthy()
   await ui.press({ key: 'children:history:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR])
   await ui.press({ key: 'running' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.unmount()
 })
 
-test('cards are compact until their arrow is pressed', async ($, on) => {
+test('cards always show who and what; the arrow adds only the extras', async ($, on) => {
   await startWithAgents($, on, NESTED_AGENTS.slice(0, 1))
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const compact = /^≈\$0\.00 · \d+:\d\d$/
+  const compact = /^≈\$0\.00 · \d+[smhd]/
   const STATUS_LINE = /→.*→.*→/
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(0)
+  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(2)
   expect(await textsOf(ui, / tools/)).toHaveLength(0)
   expect(await textsOf(ui, compact)).toHaveLength(2)
   expect(await ui.find({ type: 'Button', text: /^▸$/ })).toBeTruthy()
   await ui.press({ key: 'detail:a1' })
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(1)
+  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(2)
+  expect(await textsOf(ui, / tools/)).toHaveLength(1)
   expect(await textsOf(ui, compact)).toHaveLength(1)
   await ui.press({ key: 'detail:a1' })
-  expect(await textsOf(ui, STATUS_LINE)).toHaveLength(0)
+  expect(await textsOf(ui, / tools/)).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -520,62 +535,89 @@ const archived = (id: string, startedAt: number, session?: { sessionId: string; 
   ...session,
 })
 
-test('History groups finished workers under one root per session, newest session first', async ($, on) => {
+const DAY_MS = 24 * 60 * 60 * 1000
+const pastSnapshot = (sessionId: string, label: string, workerId: string, startedAt: number) => ({
+  version: 2,
+  sessionId,
+  label,
+  cwd: '/elsewhere',
+  heartbeat: 0,
+  orchestrator: { id: 'main', status: 'idle', startedAt, cost: 0.1 },
+  workers: [archived(workerId, startedAt)],
+})
+
+// Session files by name, each written `ageDays` ago.
+const historyFiles = (on: On, files: Record<string, { ageDays: number; snapshot: unknown }>) => {
+  const written: Record<string, string> = {}
+  on('fs.write', (_, e) => {
+    written[e.path] = e.text
+
+    return { value: undefined }
+  })
+  on('fs.list', () => ({
+    value: Object.entries(files).map(([name, file]) => ({
+      name,
+      kind: 'file',
+      size: 1,
+      mtimeMs: CLOCK_START - file.ageDays * DAY_MS,
+      isLink: false,
+    })),
+  }))
+  on('fs.read', (_, e) => {
+    const name = Object.keys(files).find(file => e.path.endsWith(file))
+
+    return { value: name ? JSON.stringify(files[name]?.snapshot) : '{}' }
+  })
+
+  return written
+}
+
+test('History lists the sessions of the last 60 days, one root per session, newest first', async ($, on) => {
   const clock = mock.clock(on, { now: CLOCK_START })
   on('command.register', () => ({ value: RUN_AGENTS }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/home' : undefined }))
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 'me' }))
   on('session.cwd', () => ({ value: 'C:/work/mine' }))
-  on('store.set', () => ({ value: undefined }))
-  on('store.get', () => ({
-    value: [
-      archived('legacy-worker', 10),
-      archived('older-worker', 100, { sessionId: 's1', sessionLabel: 'Older session' }),
-      archived('newer-worker', 200, { sessionId: 's2', sessionLabel: 'Newer session' }),
-      archived('mine-worker', 300, { sessionId: 'me', sessionLabel: 'mine' }),
-    ],
-  }))
+  on('store.get', () => ({ value: undefined }))
+  historyFiles(on, {
+    's1.json': { ageDays: 10, snapshot: pastSnapshot('s1', 'Older session', 'older-worker', 100) },
+    's2.json': { ageDays: 1, snapshot: pastSnapshot('s2', 'Newer session', 'newer-worker', 200) },
+    'stale.json': { ageDays: 61, snapshot: pastSnapshot('s0', 'Stale session', 'stale-worker', 50) },
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(TICK_MS)
+  await clock.advance(SYNC_MS)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'history' })
-  const roots = /^ (mine|Newer session|Older session|Earlier sessions)$/
-  expect(await textsOf(ui, roots)).toEqual([' mine', ' Newer session', ' Older session', ' Earlier sessions'])
+  const roots = /^ (mine|Newer session|Older session|Stale session)$/
+  expect(await textsOf(ui, roots)).toEqual([' mine', ' Newer session', ' Older session'])
   expect(await textsOf(ui, /^ [a-z]+-worker$/)).toEqual([])
 
   await ui.press({ key: 'children:history:session:s2' })
   expect(await textsOf(ui, /^ [a-z]+-worker$/)).toEqual([' newer-worker'])
-  await ui.press({ key: 'children:history:session:earlier' })
-  await ui.press({ key: 'children:history:main' })
-  expect(await textsOf(ui, /^ [a-z]+-worker$/)).toEqual([' mine-worker', ' newer-worker', ' legacy-worker'])
   await ui.unmount()
 })
 
-test('finished workers are archived with the session they ran in', async ($, on) => {
+test('finished workers stay in the session file the history is read from', async ($, on) => {
   const clock = mock.clock(on, { now: CLOCK_START })
-  const stored: unknown[][] = []
   on('command.register', () => ({ value: RUN_AGENTS }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', (_, e) => ({ value: e.name === 'USERPROFILE' ? 'C:/home' : undefined }))
   on('session.id', () => ({ value: 'me' }))
   on('session.cwd', () => ({ value: 'C:/work/mine' }))
   on('store.get', () => ({ value: undefined }))
-  on('store.set', (_, e) => {
-    stored.push(e.value as unknown[])
-
-    return { value: undefined }
-  })
   on('agent.list', () => ({
     value: [{ id: 'a1', description: 'finished task', type: 'Explore', status: 'completed' }],
   }))
+  const written = historyFiles(on, {})
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await clock.advance(TICK_MS)
+  await clock.advance(SYNC_MS)
 
-  expect(stored.at(-1)?.[0]).toMatchObject({ id: 'a1', sessionId: 'me', sessionLabel: 'mine' })
+  const own = JSON.parse(Object.entries(written).find(([path]) => path.endsWith('me.json'))?.[1] ?? 'null')
+  expect(own?.workers?.[0]).toMatchObject({ id: 'a1', status: 'completed', title: 'finished task' })
 })
 
 test('the orchestrator is headed by the session label and counts in the stat tiles', async ($, on) => {
@@ -586,7 +628,7 @@ test('the orchestrator is headed by the session label and counts in the stat til
   await $.turn.complete({ answer: '', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer', usage: USAGE })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: / mine/ })).toBeTruthy()
-  expect(await textsOf(ui, /^2k$/)).toEqual(['2k'])
+  expect(await textsOf(ui, /^1\.5K$/)).toEqual(['1.5K'])
   expect(await textsOf(ui, /^≈\$0\.02$/)).toEqual([USAGE_COST])
   await ui.unmount()
 })
@@ -760,9 +802,11 @@ test('a resumed session is seeded from its own snapshot, with the orchestrator i
   expect(await ui.find({ type: 'Text', text: /live task/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /vanished task/ })).toBeTruthy()
   await openDetails(ui, 'main')
-  expect(await textsOf(ui, /^Running$/)).toHaveLength(0)
+  // Only the two restored workers run; the main agent waits on them.
+  expect(await textsOf(ui, /^Running$/)).toHaveLength(2)
   expect(await textsOf(ui, /^Waiting$/)).toHaveLength(1)
-  expect((await textsOf(ui, /≈\$2\.00/)).length).toBeGreaterThan(0)
+  // The main card carries the session total: its own $2 and its workers' $0.75.
+  expect((await textsOf(ui, /≈\$2\.75/)).length).toBeGreaterThan(0)
   await ui.unmount()
 })
 
@@ -772,10 +816,11 @@ test('on the first tick a restored worker missing from the agent list is finishe
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Button', text: /Running · 1/ })).toBeTruthy()
+  await ui.press({ key: 'history' })
+  await ui.press({ key: 'children:history:main' })
+  expect(await ui.find({ type: 'Text', text: / vanished task/ })).toBeTruthy()
+  expect(history).toHaveLength(0)
   await ui.unmount()
-  const archivedGone = history.at(-1)?.find(entry => (entry as { id: string }).id === 'gone')
-  expect(archivedGone).toMatchObject({ status: 'completed', endedAt: OWN_SNAPSHOT.heartbeat, sessionId: 'me' })
-  expect(history.at(-1)?.some(entry => (entry as { id: string }).id === 'kept')).toBe(false)
 })
 
 test('a snapshot of another session, or an unreadable one, seeds nothing', async ($, on) => {
@@ -891,14 +936,14 @@ test('main-loop counters wait for the pane clock, a turn start and end do not', 
 test('elapsed times move on the pane clock, not every second', async ($, on) => {
   const clock = await startMainLoop($, on, [RUNNING_AGENT])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const compact = /^≈\$0\.00 · \d+:\d\d$/
+  const compact = /^≈\$0\.00 · \d+[smhd]/
   const elapsedTexts = async () => (await textsOf(ui, compact)).map(text => text.split(' · ')[1])
-  expect(await elapsedTexts()).toEqual(['0:00', '0:00'])
+  expect(await elapsedTexts()).toEqual(['0s', '0s'])
 
   await clock.advance(PANE_CLOCK_MS - TICK_MS)
-  expect(await elapsedTexts()).toEqual(['0:00', '0:00'])
+  expect(await elapsedTexts()).toEqual(['0s', '0s'])
   await clock.advance(TICK_MS)
-  expect(await elapsedTexts()).toEqual(['0:05', '0:05'])
+  expect(await elapsedTexts()).toEqual(['5s', '5s'])
   await ui.unmount()
 })
 
@@ -934,21 +979,21 @@ test('on desktop, the sub-agent arrow expands and collapses the children', async
   const svgCount = async () => (await ui.findAll({ type: 'Svg' })).length
   const expandedCount = await svgCount()
 
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.press({ key: 'children:running:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN])
   expect(await ui.find({ type: 'Button', text: /▸ 1 sub-agent/ })).toBeTruthy()
   expect(await svgCount()).toBeLessThan(expandedCount)
   await ui.press({ key: 'children:running:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.press({ key: 'history' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN])
   await ui.press({ key: 'children:history:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR])
   await ui.press({ key: 'children:history:a1' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.press({ key: 'running' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris', 'Penny'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR, WRITER])
   await ui.unmount()
 })
 
@@ -961,7 +1006,7 @@ test('a tab press switches the pane content', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /No workers running\./ })).toBeUndefined()
   expect(await ui.find({ type: 'Button', text: /History · 1/ })).toBeTruthy()
   await ui.press({ key: 'children:history:main' })
-  expect(await textsOf(ui, ROLE_NAMES)).toEqual(['Claude', 'Iris'])
+  expect(await textsOf(ui, ROLE_NAMES)).toEqual([MAIN, INSPECTOR])
   await ui.press({ key: 'running' })
   expect(await ui.find({ type: 'Text', text: /No workers running\./ })).toBeTruthy()
   await ui.unmount()

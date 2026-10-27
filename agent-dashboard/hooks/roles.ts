@@ -1,30 +1,14 @@
-// One design per kind of worker. A role is a hat drawn above the mascot's body
-// (rows 0-5 of the 12x14 grid), an optional motion of that hat, and an overlay
-// of animated pieces drawn only while the worker is busy.
+// One kind of worker: its color, the words that pick it, and the names its agents
+// go by. How its agents look lives in avatar-data.ts (ten characters per role).
 
 export type Role = {
   id: string
   category: string
-  name: string
+  /** Everyday names; each agent gets one, picked by its id. */
+  names: string[]
   color: string
   keywords: RegExp | null
-  hat: string
-  hatMotion: string
-  overlay: string
 }
-
-const SCAN = `<animateTransform attributeName="transform" type="translate" values="-0.4 0;0.4 0;-0.4 0" dur="1.2s" repeatCount="indefinite"/>`
-const NOD = `<animateTransform attributeName="transform" type="translate" values="0 0;0 0.4;0 0" dur="0.6s" repeatCount="indefinite"/>`
-const NONE = ''
-
-const blink = (begin: number, dur = 1) =>
-  `<animate attributeName="opacity" values="0;1;0" dur="${dur}s" begin="${begin}s" repeatCount="indefinite"/>`
-
-const rise = (x: number, begin: number, fill: string) =>
-  `<rect x="${x}" y="5" width="1" height="1" fill="${fill}"><animate attributeName="y" values="5;0" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/><animate attributeName="opacity" values="1;0" dur="1.2s" begin="${begin}s" repeatCount="indefinite"/></rect>`
-
-const line = (y: number, begin: number, fill: string) =>
-  `<rect x="0" y="${y}" width="3" height="1" fill="${fill}"><animate attributeName="width" values="0;3;3" dur="1.4s" begin="${begin}s" repeatCount="indefinite"/></rect>`
 
 export const ORCHESTRATOR_ROLE_ID = 'orchestrator'
 
@@ -34,152 +18,107 @@ export const ROLES: Role[] = [
     // `classify` draws only from ASSIGNABLE_ROLES.
     id: ORCHESTRATOR_ROLE_ID,
     category: 'Orchestrator',
-    name: 'Claude',
+    names: ['Alex', 'Morgan', 'Jordan', 'Taylor', 'Casey', 'Riley', 'Avery', 'Quinn', 'Harper', 'Rowan'],
     color: '#2563eb',
     keywords: null,
-    hat: `<rect x="5" y="2" width="2" height="2" fill="#facc15"/><rect x="3" y="3" width="1" height="1" fill="#facc15"/><rect x="8" y="3" width="1" height="1" fill="#facc15"/><rect x="3" y="4" width="6" height="1" fill="#facc15"/><rect x="5" y="4" width="2" height="1" fill="#ef4444"/><rect x="2" y="5" width="8" height="1" fill="#ca8a04"/>`,
-    hatMotion: NONE,
-    overlay: `<g><rect x="10" y="2" width="1" height="4" fill="#92400e"/><rect x="10" y="1" width="1" height="1" fill="#facc15"/><animateTransform attributeName="transform" type="rotate" values="-35 10.5 6;20 10.5 6;-35 10.5 6" dur="0.7s" repeatCount="indefinite"/></g><rect x="1" y="3" width="1" height="1" fill="#2563eb">${blink(0.2, 0.8)}</rect><rect x="0" y="5" width="1" height="1" fill="#93c5fd">${blink(0.6, 0.8)}</rect>`,
   },
   {
     id: 'architect',
     category: 'Architect',
-    name: 'Archie',
+    names: ['Ethan', 'Olivia', 'Daniel', 'Sophia', 'Lucas', 'Emma', 'Henry', 'Grace', 'Oliver', 'Chloe'],
     color: '#8b5cf6',
     keywords: /\b(plan|architect|strateg|roadmap|outline|blueprint)/,
-    hat: `<rect x="5" y="2" width="2" height="1" fill="#f3f4f6"/><rect x="3" y="3" width="6" height="2" fill="#f3f4f6"/><rect x="2" y="5" width="8" height="1" fill="#8b5cf6"/>`,
-    hatMotion: NOD,
-    overlay: line(2, 0, '#8b5cf6') + line(4, 0.5, '#c4b5fd') + `<rect x="0" y="2" width="1" height="3" fill="#8b5cf6" opacity="0.5"/>`,
   },
   {
     id: 'inspector',
     category: 'Inspector',
-    name: 'Iris',
+    names: ['Iris', 'Victor', 'Nora', 'Simon', 'Clara', 'Felix', 'Elena', 'Hugo', 'Vera', 'Oscar'],
     color: '#14b8a6',
     keywords: /\b(review|audit|critique|lint|inspect|check)/,
-    hat: `<rect x="3" y="3" width="6" height="2" fill="#14b8a6"/><rect x="3" y="3" width="6" height="1" fill="#0f8f82"/><rect x="2" y="5" width="9" height="1" fill="#0f766e"/>`,
-    hatMotion: SCAN,
-    overlay: `<g><rect x="9" y="1" width="3" height="1" fill="#5eead4"/><rect x="9" y="3" width="3" height="1" fill="#5eead4"/><rect x="9" y="2" width="1" height="1" fill="#5eead4"/><rect x="11" y="2" width="1" height="1" fill="#5eead4"/><animateTransform attributeName="transform" type="translate" values="0 0;-1 2;0 0" dur="1.4s" repeatCount="indefinite"/></g>`,
   },
   {
     id: 'guard',
     category: 'Guardian',
-    name: 'Sir Lock',
+    names: ['Marcus', 'Diana', 'Rex', 'Helena', 'Bruno', 'Kate', 'Logan', 'Sara', 'Owen', 'Tessa'],
     color: '#ef4444',
     keywords: /\b(secur|vulnerab|threat|auth|permission|safety|harden)/,
-    hat: `<rect x="5" y="0" width="2" height="2" fill="#ef4444"/><rect x="3" y="2" width="6" height="4" fill="#9ca3af"/><rect x="4" y="4" width="4" height="1" fill="#1f2937"/>`,
-    hatMotion: NONE,
-    overlay: `<rect x="10" y="1" width="2" height="3" fill="#ef4444"><animate attributeName="fill" values="#ef4444;#fca5a5;#ef4444" dur="0.8s" repeatCount="indefinite"/></rect><rect x="10" y="4" width="1" height="1" fill="#ef4444"/>`,
   },
   {
     id: 'chemist',
     category: 'Tester',
-    name: 'Fizz',
+    names: ['Theo', 'Mia', 'Leo', 'Ada', 'Max', 'Zoe', 'Sam', 'Ivy', 'Ben', 'Lily'],
     color: '#22c55e',
     keywords: /\b(tests?|testing|qa|verify|validate|benchmark|experiment|assert)/,
-    hat: `<rect x="2" y="3" width="8" height="1" fill="#374151"/><rect x="3" y="4" width="2" height="2" fill="#86efac"/><rect x="7" y="4" width="2" height="2" fill="#86efac"/><rect x="5" y="4" width="2" height="1" fill="#374151"/>`,
-    hatMotion: NONE,
-    overlay: rise(10, 0, '#86efac') + rise(11, 0.4, '#bbf7d0') + rise(9, 0.8, '#4ade80'),
   },
   {
     id: 'detective',
     category: 'Debugger',
-    name: 'Sherl',
+    names: ['Arthur', 'Ruby', 'Frank', 'Alice', 'Walter', 'Jane', 'George', 'Rose', 'Edward', 'Hazel'],
     color: '#a8794a',
     keywords: /\b(debug|bug|diagnos|investigat|root cause|trace|fix|crash)/,
-    hat: `<rect x="5" y="2" width="2" height="1" fill="#6b5436"/><rect x="3" y="2" width="6" height="3" fill="#a8794a"/><rect x="2" y="4" width="1" height="2" fill="#8b6f47"/><rect x="9" y="4" width="1" height="2" fill="#8b6f47"/><rect x="2" y="5" width="8" height="1" fill="#6b5436"/>`,
-    hatMotion: SCAN,
-    overlay: `<g><rect x="9" y="3" width="3" height="1" fill="#e7c9a0"/><rect x="9" y="5" width="3" height="1" fill="#e7c9a0"/><rect x="9" y="4" width="1" height="1" fill="#e7c9a0"/><rect x="11" y="4" width="1" height="1" fill="#e7c9a0"/><animateTransform attributeName="transform" type="translate" values="0 0;-8 0;0 0" dur="2.4s" repeatCount="indefinite"/></g>`,
   },
   {
     id: 'scholar',
     category: 'Researcher',
-    name: 'Sage',
+    names: ['Isaac', 'Marie', 'Albert', 'Rosalind', 'Charles', 'Emily', 'Thomas', 'Lucy', 'Nathan', 'Julia'],
     color: '#6366f1',
     keywords: /\b(research|competitor|study|analy[sz]|literature|compare|learn|investigate)/,
-    hat: `<rect x="1" y="3" width="10" height="1" fill="#1f2937"/><rect x="3" y="4" width="6" height="2" fill="#374151"/><rect x="10" y="4" width="1" height="2" fill="#facc15"/>`,
-    hatMotion: NOD,
-    overlay: `<rect x="0" y="2" width="3" height="3" fill="#e5e7eb"/><rect x="1" y="2" width="1" height="3" fill="#9ca3af"/><rect x="1.5" y="2" width="1.5" height="3" fill="#ffffff"><animate attributeName="width" values="1.5;0;1.5" dur="0.9s" repeatCount="indefinite"/></rect>`,
   },
   {
     id: 'scribe',
     category: 'Writer',
-    name: 'Penny',
+    names: ['William', 'Charlotte', 'James', 'Anne', 'Jack', 'Louisa', 'Paul', 'Mary', 'Robert', 'Agnes'],
     color: '#e11d48',
     keywords: /\b(document|docs?|write|writing|readme|copy|summar|draft|blog|changelog|translate)/,
-    hat: `<rect x="3" y="3" width="6" height="3" fill="#9f1239"/><rect x="2" y="5" width="8" height="1" fill="#7f1d1d"/><rect x="9" y="1" width="1" height="3" fill="#f4f4f4"/><rect x="10" y="0" width="1" height="2" fill="#f4f4f4"/>`,
-    hatMotion: NOD,
-    overlay: line(2, 0, '#fda4af') + line(4, 0.4, '#fb7185') + `<rect x="10" y="6" width="1" height="1" fill="#fda4af">${blink(0.2, 0.6)}</rect>`,
   },
   {
     id: 'designer',
     category: 'Designer',
-    name: 'Pixel',
+    names: ['Leon', 'Stella', 'Milo', 'Luna', 'Adrian', 'Bella', 'Dylan', 'Nina', 'Ezra', 'Maya'],
     color: '#ec4899',
     keywords: /\b(design|ui|ux|graphic|logo|style|css|layout|visual|mock|brand|icon)/,
-    hat: `<rect x="5" y="2" width="1" height="1" fill="#ec4899"/><rect x="3" y="3" width="7" height="2" fill="#ec4899"/><rect x="2" y="4" width="8" height="2" fill="#db2777"/>`,
-    hatMotion: NOD,
-    overlay: `<rect x="10" y="1" width="2" height="2" fill="#ef4444"><animate attributeName="fill" values="#ef4444;#facc15;#22c55e;#3b82f6;#ef4444" dur="1.6s" repeatCount="indefinite"/></rect><rect x="10" y="4" width="2" height="1" fill="#facc15"><animate attributeName="fill" values="#facc15;#22c55e;#3b82f6;#ef4444;#facc15" dur="1.6s" repeatCount="indefinite"/></rect>`,
   },
   {
     id: 'pilot',
     category: 'Release',
-    name: 'Ace',
+    names: ['Amelia', 'Neil', 'Sally', 'Yuri', 'Valerie', 'Scott', 'Gina', 'Mark', 'Kara', 'Tom'],
     color: '#1f9d6a',
     keywords: /\b(deploy|release|ship|launch|publish|ci|pipeline|rollout)/,
-    hat: `<rect x="3" y="3" width="6" height="2" fill="#1f9d6a"/><rect x="5" y="3" width="2" height="2" fill="#ffffff"/><rect x="2" y="5" width="8" height="1" fill="#16805a"/><rect x="9" y="0" width="1" height="5" fill="#cccccc"/>`,
-    hatMotion: NONE,
-    overlay: `<rect x="10" y="0" width="2" height="2" fill="#ffffff"><animate attributeName="height" values="2;1;2" dur="0.5s" repeatCount="indefinite"/></rect>`,
   },
   {
     id: 'miner',
     category: 'Indexer',
-    name: 'Dusty',
+    names: ['Gus', 'Ruth', 'Carl', 'Edith', 'Hank', 'Martha', 'Earl', 'Doris', 'Roy', 'Irene'],
     color: '#c4572b',
     keywords: /\b(index|grep|crawl|dig|mine|scrape|extract|data|database|query)/,
-    hat: `<rect x="3" y="2" width="6" height="3" fill="#7a4e2d"/><rect x="5" y="3" width="2" height="2" fill="#cfe9ff"/><rect x="2" y="5" width="8" height="1" fill="#c4572b"/>`,
-    hatMotion: NONE,
-    overlay: `<rect x="3" y="0" width="6" height="2" fill="#fff6b0" opacity="0"><animate attributeName="opacity" values="0;0.8;0" dur="0.9s" repeatCount="indefinite"/></rect>${rise(10, 0, '#fbbf24')}`,
   },
   {
     id: 'chef',
     category: 'Processor',
-    name: 'Remy',
+    names: ['Marco', 'Rita', 'Gino', 'Paula', 'Luis', 'Carmen', 'Remy', 'Elsa', 'Tony', 'Nadia'],
     color: '#fb923c',
     keywords: /\b(cook|process|transform|format|convert|generate|prepare|compile)/,
-    hat: `<rect x="3" y="0" width="6" height="2" fill="#f4f4f4"/><rect x="2" y="1" width="8" height="3" fill="#f4f4f4"/><rect x="2" y="4" width="8" height="2" fill="#fb923c"/>`,
-    hatMotion: NOD,
-    overlay: rise(10, 0, '#e5e7eb') + rise(11, 0.5, '#9ca3af'),
   },
   {
     id: 'scout',
     category: 'Explorer',
-    name: 'Rex',
+    names: ['Finn', 'Skye', 'Jake', 'Willow', 'Kai', 'Juniper', 'Cody', 'River', 'Rory', 'Sienna'],
     color: '#0ea5e9',
     keywords: /\b(explore|survey|scout|locate|discover|find|search)/,
-    hat: `<rect x="3" y="3" width="6" height="2" fill="#d8bd7a"/><rect x="3" y="4" width="6" height="1" fill="#8b6f47"/><rect x="1" y="5" width="10" height="1" fill="#c2a15a"/>`,
-    hatMotion: SCAN,
-    overlay: `<rect x="10" y="3" width="1" height="1" fill="#0ea5e9">${blink(0)}</rect><rect x="11" y="2" width="1" height="3" fill="#0ea5e9">${blink(0.3)}</rect>`,
   },
   {
     id: 'builder',
     category: 'Builder',
-    name: 'Bob',
+    names: ['Bob', 'Wendy', 'Mike', 'Jill', 'Pete', 'Rosie', 'Dave', 'Holly', 'Steve', 'Penny'],
     color: '#f5b800',
     keywords: /\b(build|implement|create|refactor|code|develop|add|make|landing|page|app)/,
-    hat: `<rect x="5" y="2" width="2" height="1" fill="#f5b800"/><rect x="3" y="3" width="6" height="2" fill="#f5b800"/><rect x="5" y="3" width="2" height="1" fill="#c98a00"/><rect x="2" y="5" width="8" height="1" fill="#d99c00"/>`,
-    hatMotion: NONE,
-    overlay: `<g><rect x="10" y="2" width="1" height="4" fill="#8b5a3c"/><rect x="9" y="1" width="3" height="2" fill="#9ca3af"/><animateTransform attributeName="transform" type="rotate" values="-30 10.5 6;25 10.5 6;-30 10.5 6" dur="0.6s" repeatCount="indefinite"/></g><rect x="8" y="6" width="1" height="1" fill="#fde047">${blink(0.3, 0.6)}</rect>`,
   },
   {
     id: 'wizard',
     category: 'Specialist',
-    name: 'Merlo',
+    names: ['Elias', 'Freya', 'Silas', 'Aurora', 'Damon', 'Selene', 'Caspian', 'Willa', 'Gideon', 'Mira'],
     color: '#a855f7',
     keywords: null,
-    hat: `<rect x="5" y="0" width="2" height="1" fill="#a855f7"/><rect x="4" y="1" width="4" height="1" fill="#a855f7"/><rect x="3" y="2" width="6" height="2" fill="#9333ea"/><rect x="2" y="4" width="8" height="2" fill="#7e22ce"/><rect x="5" y="3" width="1" height="1" fill="#fde047"/>`,
-    hatMotion: NOD,
-    overlay: `<rect x="1" y="2" width="1" height="1" fill="#fde047">${blink(0, 0.9)}</rect><rect x="10" y="1" width="1" height="1" fill="#fde047">${blink(0.4, 0.9)}</rect><rect x="0" y="4" width="1" height="1" fill="#e9d5ff">${blink(0.7, 0.9)}</rect>`,
   },
 ]
 
@@ -213,4 +152,28 @@ export function classify(title: string, type: string): Role {
   const sum = Array.from(type).reduce((total, char) => total + char.charCodeAt(0), 0)
 
   return ASSIGNABLE_ROLES[sum % ASSIGNABLE_ROLES.length] ?? FALLBACK
+}
+
+// FNV-1a: a cheap, stable string hash, so an agent keeps its character and name on every redraw.
+const FNV_OFFSET = 2166136261
+const FNV_PRIME = 16777619
+
+/** A stable index in [0, length) for the seed; 0 for an empty pool. */
+export function pickBySeed(seed: string, length: number): number {
+  if (length <= 0) {
+    return 0
+  }
+  let hash = FNV_OFFSET
+  for (let index = 0; index < seed.length; index++) {
+    hash = Math.imul(hash ^ seed.charCodeAt(index), FNV_PRIME) >>> 0
+  }
+
+  return hash % length
+}
+
+/** The agent's name from its role's pool, picked by its id (a different draw than its character). */
+export function agentName(roleId: string, seed: string): string {
+  const { names } = roleById(roleId)
+
+  return names[pickBySeed(`name:${seed}`, names.length)] ?? roleById(roleId).category
 }

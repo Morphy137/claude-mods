@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Avatar Catalog</title>
+<style>
+  :root { --bg: #f7f7f8; --card: #e9ebef; --text: #1f2937; --dim: #6b7280; --line: #e5e7eb; --off: #fee2e2; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #111318; --card: #1a1d24; --text: #e5e7eb; --dim: #9ca3af; --line: #2a2f3a; --off: #3b1d1d; }
+  }
+  :root[data-theme="dark"] { --bg: #111318; --card: #1a1d24; --text: #e5e7eb; --dim: #9ca3af; --line: #2a2f3a; --off: #3b1d1d; }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; display: flex; align-items: center; gap: 8px; }
+  p { color: var(--dim); margin: 0 0 16px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; }
+  button.on { background: var(--text); color: var(--bg); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .grid { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+  .avatar { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 4px 4px; text-align: center; cursor: pointer; font-size: 11px; color: var(--dim); }
+  .avatar svg { display: block; margin: 0 auto 4px; }
+  .avatar.off { background: var(--off); opacity: 0.45; }
+  .avatar.off .id { text-decoration: line-through; }
+  .discards { margin-top: 24px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  textarea { width: 100%; box-sizing: border-box; min-height: 48px; margin-top: 8px; font: 12px ui-monospace, monospace; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; }
+</style>
+</head>
+<body>
+<h1>Catálogo de avatares</h1>
+<p>10 personajes de anime por categoría de agente, hechos con cosméticos sobre el bicho original. ✦ marca a los que tienen animación propia al trabajar. Toca un avatar para descartarlo; la lista de descartes queda abajo para copiarla.</p>
+<div class="tabs" id="stateTabs"></div>
+<div class="tabs" id="categoryTabs"></div>
+<div id="catalog"></div>
+<div class="discards">
+  <strong id="discardTitle"></strong>
+  <textarea id="discardList" readonly></textarea>
+</div>
+
+<script src="characters.js"></script>
+<script>
+const W = 12, H = 14
+// Room on the right for the sleep "z" to drift up diagonally beside the head.
+const PAD_RIGHT = 7
+const BODY = '#f2604a', EYE = '#111111', NEUTRAL = '#6b7280'
+const BASE = ['', '', '', '', '', '',
+  '..BBBBBBBB..', '..BBBBBBBB..', 'BBBBBBBBBBBB', 'BBBBBBBBBBBB',
+  '..BBBBBBBB..', '..BBBBBBBB..', '..B.B..B.B..', '..B.B..B.B..']
+const EYE_XS = [3, 8], EYE_ROW = 7
+
+// Characters come from characters.js. Each part is painted in order over an empty 12x14 grid of colors.
+const KEY_POOL = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+// Paints parts in order over an empty grid and returns it as letter rows plus their palette.
+function paint(name, parts) {
+  const grid = Array.from({ length: H }, () => Array(W).fill(null))
+  for (const { rows, colors } of parts) {
+    for (const [y, pattern] of Object.entries(rows)) {
+      console.assert(pattern.length === W, `${name} row ${y}: "${pattern}"`)
+      ;[...pattern].forEach((ch, x) => {
+        if (ch === '.') return
+        console.assert(colors[ch], `${name}: no color for "${ch}"`)
+        grid[y][x] = colors[ch]
+      })
+    }
+  }
+  // Letters are handed out per color so the run-length renderer can stay letter-based.
+  const keyOf = new Map()
+  const layer = grid.map(row => row.map(hex => {
+    if (!hex) return '.'
+    if (!keyOf.has(hex)) keyOf.set(hex, KEY_POOL[keyOf.size])
+    return keyOf.get(hex)
+  }).join(''))
+  return { layer, palette: Object.fromEntries([...keyOf].map(([hex, key]) => [key, hex])) }
+}
+
+function buildAvatar(category, character, index) {
+  const extra = ANIMATIONS[character.name] ?? {}
+  const parts = character.parts
+    .map((p, i) => (extra.animate?.[i] ? { ...p, anim: extra.animate[i] } : p))
+    .concat(extra.fx ?? [])
+  return {
+    id: `${category.id}-${String(index + 1).padStart(2, '0')}`,
+    label: character.name,
+    ...paint(character.name, parts.filter(p => !p.anim)),
+    // Animated parts keep their own group so the effect moves only them.
+    animated: parts.filter(p => p.anim).map(p => ({ ...paint(character.name, [p]), anim: p.anim, fxOnly: !!p.fxOnly })),
+    motion: extra.motion ?? 'bob',
+    isCustom: Boolean(extra.animate || extra.fx || extra.motion),
+    body: character.body ?? BODY,
+    eyes: character.eyes ?? EYE,
+  }
+}
+
+const CATALOG = ANIME_CATEGORIES.map(category => ({ ...category, built: category.characters.map((c, i) => buildAvatar(category, c, i)) }))
+
+// One <rect> per horizontal run of the same color keeps the SVG small.
+function pixels(rows, palette) {
+  let out = ''
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length;) {
+      const ch = row[x]
+      let run = 1
+      while (row[x + run] === ch) run++
+      if (palette[ch]) out += `<rect x="${x}" y="${y}" width="${run}" height="1" fill="${palette[ch]}"/>`
+      x += run
+    }
+  })
+  return out
+}
+
+function eyes(isClosed, color = EYE) {
+  const y = isClosed ? EYE_ROW + 0.5 : EYE_ROW
+  const height = isClosed ? 0.4 : 1
+  return EYE_XS.map(x => `<rect x="${x}" y="${y}" width="1" height="${height}" fill="${color}"/>`).join('')
+}
+
+// A 4x4 "Z" (top bar, diagonal, bottom bar) that drifts up and to the right, fading out.
+const Z_PIXELS = '<rect width="4" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect y="3" width="4" height="1"/>'
+const Z_FROM = [12, 5], Z_TRAVEL = 3, Z_SECONDS = 2.4, Z_COUNT = 2
+function sleepZ(index) {
+  const timing = `dur="${Z_SECONDS}s" begin="${(index * Z_SECONDS) / Z_COUNT}s" repeatCount="indefinite"`
+  const [x, y] = Z_FROM
+  return `<g fill="${NEUTRAL}" opacity="0">` +
+    `<animateTransform attributeName="transform" type="translate" values="${x} ${y};${x + Z_TRAVEL} ${y - Z_TRAVEL}" ${timing}/>` +
+    `<animate attributeName="opacity" values="0;1;1;0" ${timing}/>${Z_PIXELS}</g>`
+}
+
+// Whole-body motion while busy; bob is the default hop.
+const MOTIONS = {
+  bob: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.5s" repeatCount="indefinite"/>`,
+  float: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="1.6s" repeatCount="indefinite"/>`,
+  shake: `<animateTransform attributeName="transform" type="translate" values="0 0;0.3 0;-0.3 0;0 0" dur="0.15s" repeatCount="indefinite"/>`,
+  fade: `<animate attributeName="opacity" values="1;0.25;1" dur="2s" repeatCount="indefinite"/>`,
+  jiggle: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.25s" repeatCount="indefinite"/>`,
+}
+
+function critter(avatar, state) {
+  const base = pixels(BASE, { B: avatar.body })
+  const layer = pixels(avatar.layer, avatar.palette)
+  const isBusy = state === 'busy'
+  // Outside the busy state, moving parts sit still and effects are hidden.
+  const animated = avatar.animated
+    .filter(a => isBusy || !a.fxOnly)
+    .map(a => `<g>${isBusy ? a.anim : ''}${pixels(a.layer, a.palette)}</g>`).join('')
+  if (state === 'asleep') return base + eyes(true, avatar.eyes) + layer + animated + Array.from({ length: Z_COUNT }, (_, i) => sleepZ(i)).join('')
+  if (state === 'finished') return base + eyes(false, avatar.eyes) + layer + animated
+  const blink = `<g opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.9;0.95;1" dur="3s" repeatCount="indefinite"/>` +
+    `<rect x="2" y="${EYE_ROW}" width="8" height="1" fill="${avatar.body}"/>${eyes(true, avatar.eyes)}</g>`
+  // The layer is drawn after the blink so a blindfold or mask still covers the eyes.
+  return `<g>${MOTIONS[avatar.motion] ?? MOTIONS.bob}${base}${eyes(false, avatar.eyes)}${blink}${layer}${animated}</g>`
+}
+
+function svg(avatar, state, scale) {
+  const w = W + PAD_RIGHT
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${H}" width="${w * scale}" height="${H * scale}" shape-rendering="crispEdges">${critter(avatar, state)}</svg>`
+}
+
+const STORE_KEY = 'avatar-discards'
+function loadDiscards() {
+  try { return new Set(JSON.parse(localStorage.getItem(STORE_KEY) || '[]')) } catch { return new Set() }
+}
+function saveDiscards() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify([...discards])) } catch { /* private window: discards live for this visit only */ }
+}
+
+const STATES = [['busy', 'Trabajando'], ['asleep', 'Durmiendo'], ['finished', 'Terminado']]
+const SCALE = 5
+let state = 'busy', category = 'ALL'
+const discards = loadDiscards()
+
+function render() {
+  document.getElementById('stateTabs').innerHTML = STATES.map(([id, label]) =>
+    `<button class="${id === state ? 'on' : ''}" onclick="state='${id}';render()">${label}</button>`).join('') +
+    `<button onclick="toggleTheme()">claro / oscuro</button>`
+  const total = CATALOG.reduce((sum, c) => sum + c.built.length, 0)
+  document.getElementById('categoryTabs').innerHTML =
+    `<button class="${category === 'ALL' ? 'on' : ''}" onclick="category='ALL';render()">Todas · ${total}</button>` +
+    CATALOG.map(c => `<button class="${c.id === category ? 'on' : ''}" onclick="category='${c.id}';render()"><span class="dot" style="background:${c.color}"></span> ${c.name} · ${c.built.length}</button>`).join('')
+  const shown = category === 'ALL' ? CATALOG : CATALOG.filter(c => c.id === category)
+  document.getElementById('catalog').innerHTML = shown.map(c => `
+    <h2><span class="dot" style="background:${c.color}"></span>${c.name}</h2>
+    <div class="grid">${c.built.map(a => `
+      <div class="avatar ${discards.has(a.id) ? 'off' : ''}" title="${a.label}" onclick="toggleDiscard('${a.id}')">
+        ${svg(a, state, SCALE)}<span class="id">${a.id}</span>${a.isCustom ? ' ✦' : ''}<br>${a.label}
+      </div>`).join('')}</div>`).join('')
+  const list = [...discards].sort()
+  document.getElementById('discardTitle').textContent = `Descartados: ${list.length} de ${total}`
+  document.getElementById('discardList').value = list.join(', ')
+}
+
+function toggleDiscard(id) {
+  discards.has(id) ? discards.delete(id) : discards.add(id)
+  saveDiscards()
+  render()
+}
+
+function toggleTheme() {
+  const root = document.documentElement
+  const isDark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
+  root.dataset.theme = isDark ? 'light' : 'dark'
+}
+
+console.assert(CATALOG.every(c => c.built.length === 10), 'every category has 10 avatars')
+render()
+</script>
+</body>
+</html>

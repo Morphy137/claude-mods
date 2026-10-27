@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Cosmetics</title>
+<style>
+  :root { --bg: #f7f7f8; --card: #ffffff; --text: #1f2937; --dim: #6b7280; --line: #e5e7eb; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #111318; --card: #1a1d24; --text: #e5e7eb; --dim: #9ca3af; --line: #2a2f3a; }
+  }
+  :root[data-theme="dark"] { --bg: #111318; --card: #1a1d24; --text: #e5e7eb; --dim: #9ca3af; --line: #2a2f3a; }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: var(--dim); margin: 0 0 16px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  button { font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); cursor: pointer; }
+  button.on { background: var(--text); color: var(--bg); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .states { display: flex; gap: 10px; flex-wrap: wrap; }
+  .state { text-align: center; font-size: 12px; color: var(--dim); }
+  .real { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: var(--dim); }
+  svg { display: block; }
+</style>
+</head>
+<body>
+<h1>Claude con cosméticos</h1>
+<p>El mismo bicho de 12×14 de siempre; cada personaje es solo una capa de cosméticos (pelo, gorro, venda, ropa) dibujada encima; la capa también puede teñir el cuerpo.</p>
+<div class="bar" id="controls"></div>
+<div class="grid" id="grid"></div>
+<h1 style="margin-top:32px">Personaje completo (sin el bicho)</h1>
+<p>El mismo pirata dibujado como personaje propio en cuatro tamaños. Arriba ampliado; abajo al tamaño del avatar en el panel.</p>
+<div class="grid" id="resolutions"></div>
+
+<script>
+const W = 12, H = 14
+// Extra columns on the right so the sleep "z" floats beside the head instead of over the hat.
+const PAD_RIGHT = 4
+const BODY = '#f2604a', EYE = '#111111', NEUTRAL = '#6b7280'
+const E = '............'
+
+// The base critter, exactly as the mod draws it: body rows 6-11, arms rows 8-9, legs rows 12-13.
+const BASE = [E, E, E, E, E, E,
+  '..BBBBBBBB..', '..BBBBBBBB..', 'BBBBBBBBBBBB', 'BBBBBBBBBBBB',
+  '..BBBBBBBB..', '..BBBBBBBB..', '..B.B..B.B..', '..B.B..B.B..']
+const EYE_XS = [3, 8], EYE_ROW = 7
+
+// A cosmetic is a 12-column layer over the base; '.' leaves the critter showing.
+const CHARACTERS = [
+  { name: 'Claude (original)', palette: {}, layer: [] },
+  {
+    name: 'Hechicero vendado', palette: { w: '#f1f2f6', g: '#b8bccb', k: '#111111' },
+    layer: [
+      E,
+      '....w..w....',
+      '..w.ww.ww.w.',
+      '..wwwwwwww..',
+      '..wwwwwwww..',
+      '..gwwwwwwg..',
+      '..g.g..g.g..',
+      '.kkkkkkkkkk.',
+    ],
+  },
+  {
+    name: 'Guerrero saiyajin', palette: { k: '#1b1b1f', K: '#3a3a44', b: '#2563eb' },
+    layer: [
+      E,
+      '....k...k...',
+      '...kk.kkk...',
+      '.kkkkkkkkkk.',
+      'k.kkkkkkkk.k',
+      '..kkkkkkkk..',
+      '...k.kk.k...',
+      E,
+      E,
+      'bb........bb',
+      '..bbbbbbbb..',
+    ],
+  },
+  {
+    name: 'Ninja rubio', palette: { y: '#fbbf24', Y: '#d97706', b: '#1e3a8a', s: '#cbd5e1' },
+    layer: [
+      E,
+      '....y..y....',
+      '..y.yyyy.y..',
+      '.yyyyyyyyyy.',
+      '..yyyyyyyy..',
+      '.bbbbssbbbb.',
+      '...y....y...',
+    ],
+  },
+  {
+    name: 'Pirata de sombrero de paja', palette: { t: '#eab308', T: '#a16207', r: '#dc2626', k: '#1b1b1f', x: '#7f1d1d' },
+    layer: [
+      E,
+      E,
+      '...tttttt...',
+      '..tttttttt..',
+      '..rrrrrrrr..',
+      'tttttttttttt',
+      '..kk.kk.kk..',
+      E,
+      '...x........',
+    ],
+  },
+  {
+    name: 'Espadachín', palette: { g: '#22c55e', G: '#15803d', h: '#111111', s: '#9ca3af', o: '#eab308', k: '#111111' },
+    layer: [
+      E,
+      E,
+      E,
+      E,
+      '...gggggg...',
+      '..gggggggg..',
+      '..g......g..',
+      '.o..........',
+      E,
+      E,
+      '..GGGGGGGGhh',
+      '..........ss',
+      '..........ss',
+      '..........ss',
+    ],
+  },
+  {
+    name: 'Científico loco', palette: { h: '#c3e6f2', H: '#8cc5dc', u: '#475569', w: '#f1f5f9', W: '#cbd5e1', c: '#5fc4d6' },
+    layer: [
+      E,
+      E,
+      '...h.hh.h...',
+      '..hhhhhhhh..',
+      '.hhhhhhhhhh.',
+      'hh.hhhhhh.hh',
+      '.huuuuuuuuh.',
+      E,
+      'wwWWccccWWww',
+      'wwWWccccWWww',
+      '..WWccccWW..',
+      '..wWccccWw..',
+    ],
+  },
+  {
+    name: 'Guerrera lunar', palette: { y: '#fde047', Y: '#eab308', r: '#ef4444', b: '#1d4ed8' },
+    layer: [
+      E,
+      E,
+      '.yY......Yy.',
+      'yyy.yyyy.yyy',
+      'y.yyyyyyyy.y',
+      'y.yyyrryyy.y',
+      'y.y.y..y.y.y',
+      'y..........y',
+      'y.bbbrrbbb.y',
+      'y..........y',
+      'y..........y',
+      'y..........y',
+    ],
+  },
+  {
+    name: 'Ninja copia', palette: { g: '#e2e8f0', G: '#94a3b8', b: '#1e3a8a', s: '#cbd5e1', m: '#334155' },
+    layer: [
+      E,
+      '.......gg...',
+      '......ggg...',
+      '....gggggg..',
+      '..ggggggGg..',
+      '..bbbssbbb..',
+      '..bb.g..g...',
+      '..bb........',
+      '..mmmmmmmm..',
+    ],
+  },
+  {
+    name: 'Cazademonios', palette: { h: '#7f1d1d', x: '#450a0a', e: '#f5f5f4', r: '#dc2626', g: '#15803d', k: '#111111' },
+    layer: [
+      E,
+      E,
+      E,
+      '...hhhhhh...',
+      '..hhhhhhhh..',
+      '..hhhhhhhh..',
+      '.ehx.hh.h.e.',
+      '.r........r.',
+      'gkgk....gkgk',
+      'kgkg....kgkg',
+      '..gk....kg..',
+      '..kg....gk..',
+    ],
+  },
+  {
+    name: 'Chica del bambú', palette: { k: '#111111', p: '#f472b6', B: '#3f6212', b: '#84cc16', o: '#f97316' },
+    layer: [
+      E,
+      E,
+      '.........pp.',
+      '...kkkkkkpp.',
+      '..kkkkkkkkp.',
+      '.kkkkkkkkkk.',
+      'kk.k.kk.k.kk',
+      'kk........kk',
+      'kk.BbbbbB.kk',
+      'oo........oo',
+    ],
+  },
+  {
+    name: 'Capa de nubes', palette: { k: '#111827', b: '#1e3a8a', s: '#cbd5e1', x: '#111111', r: '#dc2626', w: '#f8fafc' },
+    layer: [
+      E,
+      E,
+      E,
+      '...kkkkkk...',
+      '..kkkkkkkk..',
+      '..bbsxssbb..',
+      '.kk......kk.',
+      '.k........k.',
+      'kkkkkkkkkkkk',
+      'kkrrwkkkkkkk',
+      '..kkkkkrrw..',
+      '..kkkkkkkk..',
+    ],
+  },
+  {
+    name: 'Símbolo de la paz', palette: { y: '#facc15', Y: '#ca8a04', w: '#ffffff' },
+    layer: [
+      '...y....y...',
+      '...y....y...',
+      '..yy....yy..',
+      '..yyyyyyyy..',
+      '..yyyyyyyy..',
+      '..yyyyyyyy..',
+      E,
+      E,
+      '....wwww....',
+    ],
+  },
+  {
+    name: 'Héroe calvo', palette: { w: '#ffffff', W: '#d1d5db', r: '#dc2626', k: '#111111' },
+    layer: [
+      E,
+      E,
+      E,
+      E,
+      E,
+      E,
+      '...w........',
+      E,
+      'rr........rr',
+      'rr........rr',
+      'WWkkkkkkkkWW',
+      'WW........WW',
+      'W..........W',
+      'W..........W',
+    ],
+  },
+  {
+    name: 'Ratón eléctrico', palette: { k: '#111111', y: '#facc15', r: '#ef4444' },
+    layer: [
+      'kk........kk',
+      '.ky......yk.',
+      '..yy....yy..',
+      '..yy....yy..',
+      '...yy..yy...',
+      '...yy..yy...',
+      '..yyyyyyyy..',
+      '..y.yyyy.y..',
+      'yyryyyyyyryy',
+      'yyyyyyyyyyyy',
+      '..yyyyyyyy..',
+      '..yyyyyyyy..',
+      '..y.y..y.y..',
+      '..y.y..y.y..',
+    ],
+  },
+]
+
+
+const mirror = half => half.map(row => row + [...row].reverse().join(''))
+// A whole character (not cosmetics) drawn at several sizes; rows are full width.
+const LUFFY_PALETTE = { t: '#f2c94c', T: '#c99a2e', r: '#d62828', R: '#9b1c1c', k: '#1b1b1f', s: '#f6d3b8', S: '#e0ab8b', e: '#111111', W: '#ffffff', x: '#9b2c2c', m: '#7a2e2e', v: '#d62828', V: '#a51d1d', b: '#3b6fb6', w: '#e8eef7', o: '#7a4e2d' }
+const LUFFY_SIZES = [
+  { label: '12×14', rows: [
+    '...tttttt...',
+    '..tttttttt..',
+    '..rrrrrrrr..',
+    'tttttttttttt',
+    '..kkkkkkkk..',
+    '..ksskkssk..',
+    '..sesssses..',
+    '..sxsmmsss..',
+    '...ssssss...',
+    '.svvssssvvs.',
+    '.svvssssvvs.',
+    '..bbbbbbbb..',
+    '..www..www..',
+    '..oo....oo..',
+  ] },
+  { label: '16×16', rows: [
+    '.....tttttt.....',
+    '....tttttttt....',
+    '....rrrrrrrr....',
+    '..tttttttttttt..',
+    '...kkkkkkkkkk...',
+    '...kksskksskk...',
+    '...kssssssssk...',
+    '...ksessssesk...',
+    '....sesssses....',
+    '....sxssmmsss...',
+    '.....ssssss.....',
+    '..svvvssssvvvs..',
+    '..svvvssssvvvs..',
+    '...bbbbbbbbbb...',
+    '...wwww..wwww...',
+    '....oo....oo....',
+  ] },
+  { label: '24×24', rows: [
+    '.......tttttttttt.......',
+    '......tttttttttttt......',
+    '.....tttttttttttttt.....',
+    '.....TttttttttttttT.....',
+    '.....rrrrrrrrrrrrrr.....',
+    '.....rrrrrrrrrrrrrr.....',
+    '.tttttttttttttttttttttt.',
+    '...TTTTTTTTTTTTTTTTTT...',
+    '....kkkkkkkkkkkkkkkk....',
+    '....kksskkskkskksskk....',
+    '....kssssssssssssssk....',
+    '....ksssessssssesssk....',
+    '....ksssessssssesssk....',
+    '....ksssxssssssssssk....',
+    '.....sssxsmmmmsssss.....',
+    '......ssssssssssss......',
+    '...VvvvssssssssssvvvV...',
+    '.ssVvvvssssssssssvvvVss.',
+    '.ssVvvvssssssssssvvvVss.',
+    '.SsVvvvssssssssssvvvVsS.',
+    '...bbbbbbbbbbbbbbbbbb...',
+    '...bbbbbbb....bbbbbbb...',
+    '.....sss........sss.....',
+    '....ooooo......ooooo....',
+  ] },
+  { label: '32×32', rows: [
+    '..........tttttttttttt..........',
+    '........tttttttttttttttt........',
+    '.......tttttttttttttttttt.......',
+    '.......TttttttttttttttttT.......',
+    '.......TttttttttttttttttT.......',
+    '.......rrrrrrrrrrrrrrrrrr.......',
+    '.......rrrrrrrrrrrrrrrrrr.......',
+    '.......RRRRRRRRRRRRRRRRRR.......',
+    '.tttttttttttttttttttttttttttttt.',
+    'tttttttttttttttttttttttttttttttt',
+    '..TTTTTTTTTTTTTTTTTTTTTTTTTTTT..',
+    '.....kkkkkkkkkkkkkkkkkkkkkk.....',
+    '....kkkkkkkkkkkkkkkkkkkkkkkk....',
+    '....kkksskkksskkkksskkksskkk....',
+    '....kssssssssssssssssssssssk....',
+    '....ksssssWesssssssseWsssssk....',
+    '....kssssseesssssssseesssssk....',
+    '....kssssseesssssssseesssssk....',
+    '....ksssssxxsssssssssssssssk....',
+    '.....ssssssssmmmmmmssssssss.....',
+    '......ssssssssmmmmssssssss......',
+    '........ssssssssssssssss........',
+    '....VVvvvvssssssssssssvvvvVV....',
+    '..ssVvvvvssssssssssssssvvvvVss..',
+    '.sssVvvvvssssssssssssssvvvvVsss.',
+    '.sssVvvvvssssssssssssssvvvvVsss.',
+    '.SssVvvvvvssssssssssssvvvvvVssS.',
+    '....bbbbbbbbbbbbbbbbbbbbbbbb....',
+    '....bbbbbbbbbbbbbbbbbbbbbbbb....',
+    '.....wwwwwwww......wwwwwwww.....',
+    '......ssssss........ssssss......',
+    '.....ooooooo........ooooooo.....',
+  ] },
+]
+
+// One <rect> per horizontal run of the same color keeps the SVG small.
+function pixels(rows, palette) {
+  let out = ''
+  rows.forEach((row, y) => {
+    for (let x = 0; x < row.length;) {
+      const ch = row[x]
+      let run = 1
+      while (row[x + run] === ch) run++
+      if (palette[ch]) out += `<rect x="${x}" y="${y}" width="${run}" height="1" fill="${palette[ch]}"/>`
+      x += run
+    }
+  })
+  return out
+}
+
+function eyes(isClosed) {
+  const y = isClosed ? EYE_ROW + 0.5 : EYE_ROW
+  const height = isClosed ? 0.4 : 1
+  return EYE_XS.map(x => `<rect x="${x}" y="${y}" width="1" height="${height}" fill="${EYE}"/>`).join('')
+}
+
+function sleepZ(index) {
+  const timing = `dur="2.4s" begin="${index * 1.2}s" repeatCount="indefinite"`
+  return `<g fill="${NEUTRAL}" opacity="0"><animateTransform attributeName="transform" type="translate" values="${W} 4;${W + 1} 0" ${timing}/>` +
+    `<animate attributeName="opacity" values="0;1;1;0" ${timing}/>` +
+    `<rect width="3" height="1"/><rect x="1" y="1" width="1" height="1"/><rect y="2" width="3" height="1"/></g>`
+}
+
+function critter(character, state) {
+  const base = pixels(BASE, { B: BODY })
+  const layer = pixels(character.layer, character.palette)
+  if (state === 'asleep') return base + eyes(true) + layer + sleepZ(0) + sleepZ(1)
+  if (state === 'finished') return base + eyes(false) + layer
+  const blink = `<g opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.9;0.95;1" dur="3s" repeatCount="indefinite"/>` +
+    `<rect x="2" y="${EYE_ROW}" width="8" height="1" fill="${BODY}"/>${eyes(true)}</g>`
+  const bob = `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.5s" repeatCount="indefinite"/>`
+  // The layer is drawn after the blink so a blindfold still covers the eyes.
+  return `<g>${bob}${base}${eyes(false)}${blink}${layer}</g>`
+}
+
+function svg(character, state, scale) {
+  const w = W + PAD_RIGHT
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${H}" width="${w * scale}" height="${H * scale}" shape-rendering="crispEdges">${critter(character, state)}</svg>`
+}
+
+const STATES = [['busy', 'trabajando'], ['asleep', 'durmiendo'], ['finished', 'terminado']]
+// The mod draws card avatars 56 px tall: 4 screen pixels per sprite pixel.
+const REAL_SCALE = 4
+let scale = 6
+
+function render() {
+  document.getElementById('grid').innerHTML = CHARACTERS.map(character => `
+    <div class="card">
+      <h2>${character.name}</h2>
+      <div class="states">${STATES.map(([id, label]) => `<div class="state">${svg(character, id, scale)}${label}</div>`).join('')}</div>
+      <div class="real">${svg(character, 'busy', REAL_SCALE)}tamaño real en el panel</div>
+    </div>`).join('')
+  document.getElementById('controls').innerHTML = [4, 6, 8].map(value =>
+    `<button class="${value === scale ? 'on' : ''}" onclick="scale=${value};render()">×${value}</button>`).join('') +
+    `<button onclick="toggleTheme()">claro / oscuro</button>`
+}
+
+
+const PANEL_HEIGHT = 56, ZOOM_HEIGHT = 224
+// Integer scales keep every sprite pixel the same size on screen.
+function sizedSvg(rows, palette, targetHeight) {
+  const w = rows[0].length, h = rows.length
+  const scale = Math.max(1, Math.round(targetHeight / h))
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="${w * scale}" height="${h * scale}" shape-rendering="crispEdges">${pixels(rows, palette)}</svg>`
+}
+
+function renderResolutions() {
+  document.getElementById('resolutions').innerHTML = LUFFY_SIZES.map(size => {
+    const panelPx = Math.max(1, Math.round(PANEL_HEIGHT / size.rows.length)) * size.rows.length
+    return `
+    <div class="card"><h2>${size.label}</h2>
+      ${sizedSvg(size.rows, LUFFY_PALETTE, ZOOM_HEIGHT)}
+      <div class="real">${sizedSvg(size.rows, LUFFY_PALETTE, PANEL_HEIGHT)}en el panel (${panelPx} px)</div>
+    </div>`
+  }).join('')
+}
+
+function toggleTheme() {
+  const root = document.documentElement
+  const isDark = root.dataset.theme ? root.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches
+  root.dataset.theme = isDark ? 'light' : 'dark'
+}
+
+// Self-check: every layer row is exactly W wide and no layer is taller than the critter.
+CHARACTERS.forEach(c => {
+  console.assert(c.layer.length <= H, `${c.name}: ${c.layer.length} rows`)
+  c.layer.forEach((row, y) => console.assert(row.length === W, `${c.name} row ${y}: ${row.length}`))
+})
+render()
+renderResolutions()
+</script>
+</body>
+</html>

@@ -1,7 +1,8 @@
 import type { WorkerActivity } from '../types'
 
+import { SPRITES, type Sprite, type SpriteLayer, type SpriteMotion } from './avatar-data'
 import { readableColor } from './colors'
-import { roleById } from './roles'
+import { ORCHESTRATOR_ROLE_ID, pickBySeed, roleById } from './roles'
 
 const BODY = '#f2604a'
 const EYE = '#111111'
@@ -9,6 +10,9 @@ const EYE = '#111111'
 const NEUTRAL = '#6b7280'
 const GRID_W = 12
 const GRID_H = 14
+// Columns right of the critter where the sleep "z" drifts, clear of hats and held props.
+const SLEEP_ROOM = 7
+const AVATAR_GRID_W = GRID_W + SLEEP_ROOM
 export const BAND_HEIGHT = 64
 const MASCOT_SCALE = 4
 export const MASCOT_W = GRID_W * MASCOT_SCALE
@@ -19,16 +23,32 @@ const EYE_ROW = 7
 const EYE_XS = [3, 8]
 const CLOSED_EYE_OFFSET = 0.5
 const CLOSED_EYE_HEIGHT = 0.4
+const BASE_ROWS = [
+  '', '', '', '', '', '',
+  '..BBBBBBBB..', '..BBBBBBBB..', 'BBBBBBBBBBBB', 'BBBBBBBBBBBB',
+  '..BBBBBBBB..', '..BBBBBBBB..', '..B.B..B.B..', '..B.B..B.B..',
+]
 const TRACK_GAP = 8
 const TRACK_SPACING = 16
 const TRACK_ASLEEP_OPACITY = 0.2
 const TRACK_NEUTRAL_OPACITY = 0.35
 const TRACK_ROLE_OPACITY = 0.45
 const PACKET_SIZE = 6
-const SLEEP_Z_X = 9
-const SLEEP_Z_FROM_Y = 3
+// A 4x4 "Z" (top bar, diagonal, bottom bar) that drifts up and to the right.
+const SLEEP_Z_PIXELS = '<rect width="4" height="1"/><rect x="2" y="1" width="1" height="1"/><rect x="1" y="2" width="1" height="1"/><rect y="3" width="4" height="1"/>'
+const SLEEP_Z_FROM = [12, 5]
+const SLEEP_Z_TRAVEL = 3
 const SLEEP_Z_SECONDS = 2.4
 const SLEEP_Z_COUNT = 2
+const BLINK_SECONDS = 3
+
+const MOTIONS: Record<SpriteMotion, string> = {
+  bob: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.5s" repeatCount="indefinite"/>`,
+  float: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -1;0 0" dur="1.6s" repeatCount="indefinite"/>`,
+  shake: `<animateTransform attributeName="transform" type="translate" values="0 0;0.3 0;-0.3 0;0 0" dur="0.15s" repeatCount="indefinite"/>`,
+  fade: `<animate attributeName="opacity" values="1;0.25;1" dur="2s" repeatCount="indefinite"/>`,
+  jiggle: `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.25s" repeatCount="indefinite"/>`,
+}
 
 const BAR_ROWS = 3
 const BAR_CELL = 3
@@ -41,8 +61,8 @@ const BAR_TOP = Math.floor((BAR_ROW_HEIGHT - BAR_HEIGHT) / 2)
 const BAR_EMPTY_OPACITY = 0.12
 // GitHub-like shades of the worker's color; a finished bar shows all of them, none dim.
 const BAR_SHADES = [0.55, 0.7, 0.85, 1]
-// A bar never gets wider than this many columns, however wide its slot: the SVG stays small.
-export const MAX_BAR_COLUMNS = 40
+// Bars span their whole slot; this cap only bounds the SVG on absurdly wide surfaces.
+export const MAX_BAR_COLUMNS = 200
 // Time constant of the fill: a busy bar reaches 1 - 1/e (about 63 %) of its columns after this long.
 export const BAR_FILL_SECONDS = 90
 // A busy bar never claims to be done; only finishing lights the last columns.
@@ -82,70 +102,107 @@ export function trackYs(): { upper: number; lower: number } {
   return { upper: bodyMiddle - TRACK_SPACING / 2, lower: bodyMiddle + TRACK_SPACING / 2 }
 }
 
-// A 3x3 pixel "z" that drifts up and fades; the copies are staggered evenly.
+/** The agent's character: one of its role's sprites, picked by a stable seed (the agent's id). */
+export function spriteFor(roleId: string | null, seed: string): Sprite {
+  const pool = SPRITES[roleId ?? ORCHESTRATOR_ROLE_ID] ?? SPRITES[ORCHESTRATOR_ROLE_ID] ?? []
+  const sprite = pool[pickBySeed(seed, pool.length)]
+  if (!sprite) {
+    throw new Error(`no sprites for role ${roleId}`)
+  }
+
+  return sprite
+}
+
+// One <rect> per horizontal run of the same color keeps the SVG small.
+function pixels({ layer, palette }: SpriteLayer): string {
+  let out = ''
+  layer.forEach((row, y) => {
+    for (let x = 0; x < row.length; ) {
+      const key = row[x] ?? '.'
+      let run = 1
+      while (row[x + run] === key) {
+        run++
+      }
+      const fill = palette[key]
+      if (fill) {
+        out += `<rect x="${x}" y="${y}" width="${run}" height="1" fill="${fill}"/>`
+      }
+      x += run
+    }
+  })
+
+  return out
+}
+
+function eyes(isClosed: boolean, color: string): string {
+  const y = isClosed ? EYE_ROW + CLOSED_EYE_OFFSET : EYE_ROW
+  const height = isClosed ? CLOSED_EYE_HEIGHT : 1
+
+  return EYE_XS.map(x => `<rect x="${x}" y="${y}" width="1" height="${height}" fill="${color}"/>`).join('')
+}
+
+// Copies are staggered with negative begins so the loop is already running when drawn.
 function sleepZ(index: number): string {
-  const begin = ((index * SLEEP_Z_SECONDS) / SLEEP_Z_COUNT).toFixed(2)
-  const timing = `dur="${SLEEP_Z_SECONDS}s" begin="${begin}s" repeatCount="indefinite"`
+  const timing = `dur="${SLEEP_Z_SECONDS}s" begin="${(-index * SLEEP_Z_SECONDS) / SLEEP_Z_COUNT}s" repeatCount="indefinite"`
+  const [x = 0, y = 0] = SLEEP_Z_FROM
 
   return (
     `<g fill="${NEUTRAL}" opacity="0">` +
-    `<animateTransform attributeName="transform" type="translate" values="${SLEEP_Z_X} ${SLEEP_Z_FROM_Y};${SLEEP_Z_X} 0" ${timing}/>` +
-    `<animate attributeName="opacity" values="0;1;1;0" ${timing}/>` +
-    `<rect width="3" height="1"/><rect x="1" y="1" width="1" height="1"/><rect y="2" width="3" height="1"/>` +
-    `</g>`
+    `<animateTransform attributeName="transform" type="translate" values="${x} ${y};${x + SLEEP_Z_TRAVEL} ${y - SLEEP_Z_TRAVEL}" ${timing}/>` +
+    `<animate attributeName="opacity" values="0;1;1;0" ${timing}/>${SLEEP_Z_PIXELS}</g>`
   )
 }
 
-function eyes(isAsleep: boolean): string {
-  const y = isAsleep ? EYE_ROW + CLOSED_EYE_OFFSET : EYE_ROW
-  const height = isAsleep ? CLOSED_EYE_HEIGHT : 1
+// A finished agent sleeps without animating anything: one still "z".
+function stillZ(): string {
+  const [x = 0, y = 0] = SLEEP_Z_FROM
 
-  return EYE_XS.map(x => `<rect x="${x}" y="${y}" width="1" height="${height}" fill="${EYE}"/>`).join('')
+  return `<g fill="${NEUTRAL}" opacity="0.6" transform="translate(${x + 1} ${y - 2})">${SLEEP_Z_PIXELS}</g>`
 }
 
 /**
- * The Claude critter on a 12x14 grid: body rows 6-11, arms rows 8-9, eyes row 7,
- * four legs at x 2, 4, 7 and 9 on rows 12-13, the same feet on every worker.
- * `roleId` null draws it bare (the main agent). The role's overlay, the hat's
- * motion and the bob play only while busy; asleep it closes its eyes and
- * dreams of "z"; finished it just stands.
+ * The Claude critter (12x14 grid: body rows 6-11, arms rows 8-9, legs rows
+ * 12-13, eyes at row 7) dressed as one of its role's characters. Busy, it moves
+ * (its sprite's motion, a blink, its animated props and effects); asleep it
+ * closes its eyes and dreams of drifting "z"; finished it sleeps still, with no
+ * animation at all. `roleId` null is the main agent.
  */
-export function mascot(roleId: string | null, activity: WorkerActivity): string {
-  const role = roleId === null ? null : roleById(roleId)
+export function mascot(roleId: string | null, activity: WorkerActivity, seed = ''): string {
+  const sprite = spriteFor(roleId, seed)
+  const body = sprite.body ?? BODY
+  const eyeColor = sprite.eyes ?? EYE
+  const base = pixels({ layer: BASE_ROWS, palette: { B: body } })
+  const layer = pixels(sprite)
   const isBusy = activity === 'busy'
-  const isAsleep = activity === 'asleep'
-  const hat = role ? `<g>${role.hat}${isBusy ? role.hatMotion : ''}</g>` : ''
-  const overlay = role && isBusy ? role.overlay : ''
-  const bob = isBusy
-    ? `<animateTransform attributeName="transform" type="translate" values="0 0;0 -0.5;0 0" dur="0.5s" repeatCount="indefinite"/>`
-    : ''
-  const dreams = isAsleep ? Array.from({ length: SLEEP_Z_COUNT }, (_, index) => sleepZ(index)).join('') : ''
-  const legs = [2, 4, 7, 9]
-    .map(x => `<rect x="${x}" y="12" width="1" height="2" fill="${BODY}"/>`)
+  const animated = sprite.animated
+    .filter(part => isBusy || !part.fxOnly)
+    .map(part => `<g>${isBusy ? part.anim : ''}${pixels(part)}</g>`)
     .join('')
+  if (activity === 'asleep') {
+    const dreams = Array.from({ length: SLEEP_Z_COUNT }, (_, index) => sleepZ(index)).join('')
 
-  return (
-    `<g>${bob}` +
-    hat +
-    overlay +
-    dreams +
-    `<rect x="2" y="${BODY_TOP_ROW}" width="8" height="${BODY_ROWS}" fill="${BODY}"/>` +
-    `<rect x="0" y="8" width="2" height="2" fill="${BODY}"/><rect x="10" y="8" width="2" height="2" fill="${BODY}"/>` +
-    eyes(isAsleep) +
-    legs +
-    `</g>`
-  )
+    return `<g>${base}${eyes(true, eyeColor)}${layer}${animated}${dreams}</g>`
+  }
+  if (activity === 'finished') {
+    return `<g>${base}${eyes(true, eyeColor)}${layer}${animated}${stillZ()}</g>`
+  }
+  const blink =
+    `<g opacity="0"><animate attributeName="opacity" values="0;0;1;0" keyTimes="0;0.9;0.95;1" dur="${BLINK_SECONDS}s" repeatCount="indefinite"/>` +
+    `<rect x="2" y="${EYE_ROW}" width="8" height="1" fill="${body}"/>${eyes(true, eyeColor)}</g>`
+
+  // The layer is drawn after the blink so a blindfold or mask still covers the eyes.
+  return `<g>${MOTIONS[sprite.motion]}${base}${eyes(false, eyeColor)}${blink}${layer}${animated}</g>`
 }
 
 export function avatarWidth(height: number): number {
-  return Math.round((height * GRID_W) / GRID_H)
+  return Math.round((height * AVATAR_GRID_W) / GRID_H)
 }
 
-export function avatarSvg(roleId: string, activity: WorkerActivity, height: number): string {
-  return memoized(avatarCache, `${roleId}|${activity}|${height}`, () => {
+export function avatarSvg(roleId: string, activity: WorkerActivity, height: number, seed = ''): string {
+  return memoized(avatarCache, `${roleId}|${seed}|${activity}|${height}`, () => {
     const width = avatarWidth(height)
 
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${GRID_W} ${GRID_H}" width="${width}" height="${height}" shape-rendering="crispEdges">${mascot(roleId, activity)}</svg>`
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${AVATAR_GRID_W} ${GRID_H}" width="${width}" height="${height}" shape-rendering="crispEdges">${mascot(roleId, activity, seed)}</svg>`
   })
 }
 
@@ -236,11 +293,13 @@ export function barSvg(color: string, activity: WorkerActivity, width: number, e
  * between them; otherwise both sleep over a faint static track. It carries no
  * text, so it only changes when the worker, its state or the width does.
  */
-export function bandSvg(args: { roleId: string | null; width: number; isBusy: boolean }): string {
-  return memoized(bandCache, `${args.roleId}|${args.width}|${args.isBusy}`, () => buildBand(args))
+export function bandSvg(args: BandArgs): string {
+  return memoized(bandCache, `${args.roleId}|${args.mainSeed}|${args.workerSeed}|${args.width}|${args.isBusy}`, () => buildBand(args))
 }
 
-function buildBand(args: { roleId: string | null; width: number; isBusy: boolean }): string {
+type BandArgs = { roleId: string | null; width: number; isBusy: boolean; mainSeed: string; workerSeed: string }
+
+function buildBand(args: BandArgs): string {
   const activity: WorkerActivity = args.isBusy ? 'busy' : 'asleep'
   const color = args.roleId === null ? NEUTRAL : readableColor(roleById(args.roleId).color)
   const width = args.width
@@ -264,8 +323,8 @@ function buildBand(args: { roleId: string | null; width: number; isBusy: boolean
 
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${BAND_HEIGHT}" width="${width}" height="${BAND_HEIGHT}" shape-rendering="crispEdges">` +
-    `<g transform="translate(0 ${feetY}) scale(${MASCOT_SCALE})">${mascot(null, activity)}</g>` +
-    `<g transform="translate(${width - MASCOT_W} ${feetY}) scale(${MASCOT_SCALE})">${mascot(args.roleId, activity)}</g>` +
+    `<g transform="translate(0 ${feetY}) scale(${MASCOT_SCALE})">${mascot(null, activity, args.mainSeed)}</g>` +
+    `<g transform="translate(${width - MASCOT_W} ${feetY}) scale(${MASCOT_SCALE})">${mascot(args.roleId, activity, args.workerSeed)}</g>` +
     track +
     `</svg>`
   )

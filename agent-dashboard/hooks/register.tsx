@@ -5,6 +5,7 @@ import type {
   ArchivedWorker,
   DashboardTab,
   SessionSnapshot,
+  SessionTotals,
   Worker,
   WorkerActivity,
   WorkerStatus,
@@ -23,21 +24,25 @@ import {
 } from './orchestrator'
 import { PANE_OPEN_STORE_KEY, isPaneDismissal } from './pane'
 import { sameSnapshotsStructure, sameWorkerStructure, sameWorkersStructure } from './publish'
-import { classify, roleById } from './roles'
+import { agentName, classify, roleById } from './roles'
 import {
   SESSIONS_SUBDIR,
   SNAPSHOT_VERSION,
   SYNC_MS,
-  archiveEntry,
   endedSnapshot,
   finishVanished,
-  firstPromptTitle,
+  customTitleOf,
+  firstPrompt,
+  historyEntries,
   isFileRecent,
   isSessionFile,
+  isWithinHistory,
   liveSnapshots,
   parseSnapshotText,
   pastSessionGroups,
   pastSessionRoot,
+  projectFolderName,
+  promptTitle,
   restoredOrchestrator,
   restoredTitle,
   restoredUnfinished,
@@ -49,7 +54,7 @@ import {
   snapshotContentKey,
 } from './sessions'
 import { FINISHED, activityOf, isBusy, isFailed, isRunning } from './status'
-import { clip } from './text'
+import { clip, formatCount, formatDuration } from './text'
 import type { TreeNode } from './tree'
 import { branchGutter, buildTree, descendants, hasChildren, subtreeCost, trunkText } from './tree'
 
@@ -89,14 +94,24 @@ const BAND_MARGIN_PX = 24
 const MIN_SURFACE_PX = 240
 const MIN_BAR_PX = 120
 const AVATAR_PX = 56
+// Progress bars keep one small width: the pane's width is not known reliably while it is resized.
+const BAR_PX = 96
 // Cells the band caption row keeps clear at its right end: the worker mascot's width.
 const BAND_MASCOT_CELLS = Math.ceil(MASCOT_W / CELL_PX)
 const CARD_GAP_PX = 12
 const TICK_MS = 1000
 // The pane's clock: elapsed times, counters and remote counters reach it this often, not every second.
 const PANE_CLOCK_MS = 5000
+// Idle, the tick polls agents and redraws the clock this rarely: nothing moves meanwhile.
+const IDLE_TICK_MS = 5000
+const IDLE_CLOCK_MS = 60_000
+// Other sessions' files change rarely; the history rereads them this often.
+const HISTORY_REFRESH_MS = 5 * 60_000
+// The transcript (often megabytes) is read for the app's session name every 30 s until
+// it has one, then every 5 min to catch a rename.
+const TITLE_REFRESH_MS = 30_000
+const TITLE_RENAME_MS = 5 * 60_000
 const MAX_WORKERS = 60
-const TOKENS_PER_K = 1000
 const TOKENS_PER_M = 1_000_000
 const CACHE_READ_RATE = 0.1
 const CACHE_WRITE_RATE = 1.25
@@ -104,8 +119,6 @@ const CACHE_WRITE_RATE = 1.25
 const CLOCK_LINGER_MS = PANE_CLOCK_MS
 const SUMMARY_CHARS = 180
 const HISTORY_FILES = 6
-const HISTORY_STORE_KEY = 'history'
-const MAX_ARCHIVED = 60
 const REMOTE_TITLE_CHARS = 30
 
 // Mid-tone colors; `readableColor` pulls each into a range legible on light and dark.
@@ -156,6 +169,7 @@ const childrenOpen = atom({ plugin: 'agent-dashboard', key: 'childrenOpen' } as 
 const detailOpen = atom({ plugin: 'agent-dashboard', key: 'detailOpen' } as const, [])
 const otherSessions = atom({ plugin: 'agent-dashboard', key: 'otherSessions' } as const, [])
 const sessionTitle = atom({ plugin: 'agent-dashboard', key: 'sessionTitle' } as const, '')
+const totals = atom({ plugin: 'agent-dashboard', key: 'totals' } as const, { usd: null, startedAt: 0 } as SessionTotals)
 
 type Usage = {
   input_tokens: number
@@ -218,16 +232,13 @@ function baseName(path: string): string {
   return path.split(/[\\/]/).pop() ?? path
 }
 
-function minutes(totalSeconds: number): string {
-  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`
-}
-
 function elapsed(worker: Worker, clockNow: number): string {
   if (worker.startedAt <= 0) {
-    return minutes(0)
+    return formatDuration(0)
   }
   const end = worker.endedAt > 0 ? worker.endedAt : clockNow
-  return minutes(Math.max(0, Math.round((end - worker.startedAt) / 1000)))
+
+  return formatDuration(end - worker.startedAt)
 }
 
 /** The tab's default for showing sub-agents: shown while running, hidden in history. */
@@ -389,9 +400,42 @@ async function seed($: StateDollar, list: Worker[], orchestrator: Worker): Promi
   await publishAll($)
 }
 
-/** Finished workers of earlier sessions, newest last, as kept in `$.store`. */
-function storedHistory(value: unknown): ArchivedWorker[] {
-  return Array.isArray(value) ? (value as ArchivedWorker[]) : []
+type HistoryControls = {
+  fs: {
+    list: (path: string) => Promise<Array<{ name: string; kind: string; mtimeMs: number }>>
+    read: (path: string) => Promise<unknown>
+  }
+}
+
+/**
+ * The history: every other session whose file was written within the last
+ * HISTORY_DAYS, read from the session files (which survive reinstalls, unlike
+ * `$.store`). Older files are left alone and never read.
+ */
+async function loadHistory(
+  $: HistoryControls,
+  directory: string | undefined,
+  ownSessionId: string,
+  stamp: number,
+): Promise<ArchivedWorker[]> {
+  if (!directory) {
+    return []
+  }
+  const ownFile = sessionFileName(ownSessionId)
+  const entries = await $.fs.list(directory).catch(() => [])
+  const recent = entries.filter(
+    entry => entry.kind === 'file' && isSessionFile(entry.name) && entry.name !== ownFile && isWithinHistory(entry.mtimeMs, stamp),
+  )
+  const parsed = await Promise.all(
+    recent.map(entry =>
+      $.fs
+        .read(`${directory}/${entry.name}`)
+        .then(raw => (typeof raw === 'string' ? parseSnapshotText(raw) : null))
+        .catch(() => null),
+    ),
+  )
+
+  return parsed.flatMap(snapshot => (snapshot ? historyEntries(snapshot) : []))
 }
 
 type SyncControls = {
@@ -400,14 +444,21 @@ type SyncControls = {
 
 /** `<claude config dir>/agent-dashboard/sessions`; the config dir is CLAUDE_CONFIG_DIR, else `~/.claude`. */
 async function sessionsDirectory($: SyncControls): Promise<string | undefined> {
+  const config = await configDirectory($)
+
+  return config ? `${config}/${SESSIONS_SUBDIR}` : undefined
+}
+
+/** CLAUDE_CONFIG_DIR, else `~/.claude`. */
+async function configDirectory($: SyncControls): Promise<string | undefined> {
   const configured = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
   if (configured) {
-    return `${configured}/${SESSIONS_SUBDIR}`
+    return configured
   }
   const home =
     (await $.env.get('USERPROFILE').catch(() => undefined)) ?? (await $.env.get('HOME').catch(() => undefined))
 
-  return home ? `${home}/.claude/${SESSIONS_SUBDIR}` : undefined
+  return home ? `${home}/.claude` : undefined
 }
 
 type TranscriptControls = {
@@ -415,10 +466,40 @@ type TranscriptControls = {
 }
 
 /** Claude Code exposes no session title, so the first prompt of the transcript stands in for it. */
-async function promptTitleOf($: TranscriptControls): Promise<string> {
+async function firstPromptOf($: TranscriptControls): Promise<string> {
   const found = await $.session.messages().catch(() => [])
 
-  return Array.isArray(found) ? firstPromptTitle(found) : ''
+  return Array.isArray(found) ? firstPrompt(found) : ''
+}
+
+type TitleSource = {
+  fs: {
+    read: (path: string) => Promise<unknown>
+    list: (path: string) => Promise<Array<{ name: string; kind: string }>>
+    exists: (path: string) => Promise<boolean>
+  }
+}
+
+/**
+ * The session's transcript, `<config>/projects/<cwd as a folder name>/<id>.jsonl`.
+ * A session that changed folder keeps its transcript under the first one, so the
+ * other project folders are searched when the expected one has no file.
+ */
+async function findTranscript($: TitleSource, projects: string, cwd: string, sessionId: string): Promise<string | undefined> {
+  const file = `${sessionId}.jsonl`
+  const expected = `${projects}/${projectFolderName(cwd)}/${file}`
+  if (await $.fs.exists(expected).catch(() => false)) {
+    return expected
+  }
+  const folders = await $.fs.list(projects).catch(() => [])
+  for (const folder of folders.filter(entry => entry.kind === 'dir')) {
+    const path = `${projects}/${folder.name}/${file}`
+    if (await $.fs.exists(path).catch(() => false)) {
+      return path
+    }
+  }
+
+  return undefined
 }
 
 type RestoreControls = StateDollar & {
@@ -497,10 +578,6 @@ export const register: Register = on => {
     await update($, currentCwd, () => initialCwd)
     await update($, currentSessionId, () => initialSessionId)
 
-    const past = storedHistory(await $.store.get(HISTORY_STORE_KEY))
-    await update($, archive, () => past)
-    const archivedIds = new Set(past.map(worker => worker.id))
-
     const directory = await sessionsDirectory($)
     // Workers restored from this session's own file; the first tick settles those the engine no longer lists.
     let restoredAt = await restoreOwnSnapshot($, directory, initialSessionId)
@@ -510,19 +587,20 @@ export const register: Register = on => {
     // So the tick publishes status changes at once and everything else (counters,
     // the pane clock) every PANE_CLOCK_MS.
     let isAdopted = false
+    let lastPollAt = 0
     $.clock.every(TICK_MS, async () => {
       if (!isAdopted) {
         isAdopted = true
         await adoptDrawnState($)
       }
-      const [agents, stamp, current, seenRunningAt, mainAgent, paneStamp] = await Promise.all([
-        $.agent.list(),
-        $.clock.now(),
-        read($, liveWorkers),
-        read($, lastRunningAt),
-        read($, liveMain),
-        read($, now),
-      ])
+      const [stamp, seenRunningAt, mainAgent] = await Promise.all([$.clock.now(), read($, lastRunningAt), read($, liveMain)])
+      // With nothing running for a while, poll every IDLE_TICK_MS instead of every second.
+      const wasRecentlyBusy = isBusy(mainAgent) || stamp - seenRunningAt < CLOCK_LINGER_MS + TICK_MS
+      if (!wasRecentlyBusy && stamp - lastPollAt < IDLE_TICK_MS) {
+        return
+      }
+      lastPollAt = stamp
+      const [agents, current, paneStamp] = await Promise.all([$.agent.list(), read($, liveWorkers), read($, now)])
       const liveIds = new Set(agents.map(agent => agent.id))
       const mergeAgents = (list: Worker[]) =>
         agents.reduce(
@@ -552,35 +630,28 @@ export const register: Register = on => {
       // The main turn keeps the clock going too, so the orchestrator's elapsed time moves.
       const isAnyBusy = isBusy(mainAgent) || agents.some(agent => activityOf(agent.status) === 'busy')
       const isClockRunning = isAnyBusy || stamp - seenRunningAt < CLOCK_LINGER_MS + TICK_MS
-      if (isClockRunning && stamp - paneStamp >= PANE_CLOCK_MS) {
+      // Idle, the session clock still moves, once a minute.
+      if (stamp - paneStamp >= (isClockRunning ? PANE_CLOCK_MS : IDLE_CLOCK_MS)) {
         await publishAll($)
+        const usage = await $.session.usage().catch(() => null)
+        if (usage) {
+          const fresh: SessionTotals = { usd: usage.cost?.usd ?? null, startedAt: usage.startedAt }
+          await update($, totals, current => (current.usd === fresh.usd && current.startedAt === fresh.startedAt ? current : fresh))
+        }
         await update($, now, () => stamp)
       }
       if (isAnyBusy) {
         await update($, lastRunningAt, () => stamp)
-      }
-
-      const finished = (await read($, liveWorkers)).filter(
-        worker => !isRunning(worker) && !archivedIds.has(worker.id),
-      )
-      if (finished.length > 0) {
-        finished.forEach(worker => archivedIds.add(worker.id))
-        const [stored, sessionId, cwd, knownTitle] = await Promise.all([
-          $.store.get(HISTORY_STORE_KEY),
-          $.session.id().catch(() => ''),
-          $.session.cwd().catch(() => ''),
-          read($, sessionTitle),
-        ])
-        const label = sessionLabel(knownTitle || (await promptTitleOf($)), cwd)
-        const kept = storedHistory(stored).filter(worker => !finished.some(done => done.id === worker.id))
-        const entries = finished.map(worker => archiveEntry(worker, sessionId, label))
-        await $.store.set(HISTORY_STORE_KEY, [...kept, ...entries].slice(-MAX_ARCHIVED))
       }
     })
 
     if (directory) {
       let published = { sessionId: '', key: '', heartbeat: 0 }
       let othersPublishedAt = 0
+      let historyLoadedAt = -HISTORY_REFRESH_MS
+      let titleCheckedAt = -TITLE_REFRESH_MS
+      let transcriptPath: string | undefined
+      let hasAppTitle = false
 
       // Publishes this session's snapshot, then reads the others'. Disk and atom
       // writes happen only when something changed (or a heartbeat is due).
@@ -599,9 +670,20 @@ export const register: Register = on => {
         if (sessionId !== (await read($, currentSessionId))) {
           await update($, currentSessionId, () => sessionId)
         }
-        const title = knownTitle || (await promptTitleOf($))
-        if (title !== knownTitle) {
-          await update($, sessionTitle, () => title)
+        let title = knownTitle
+        if (stamp - titleCheckedAt >= (hasAppTitle ? TITLE_RENAME_MS : TITLE_REFRESH_MS)) {
+          titleCheckedAt = stamp
+          const config = await configDirectory($)
+          transcriptPath ??= config ? await findTranscript($, `${config}/projects`, cwd, sessionId) : undefined
+          const raw = transcriptPath ? await $.fs.read(transcriptPath).catch(() => '') : ''
+          // The app's own name for the session; the gist of the first prompt until it has one.
+          const appTitle = customTitleOf(typeof raw === 'string' ? raw : '')
+          hasAppTitle = appTitle !== ''
+          const named = appTitle || title || promptTitle(await firstPromptOf($))
+          if (named !== title) {
+            title = named
+            await update($, sessionTitle, () => named)
+          }
         }
         const snapshot = buildSnapshot({
           sessionId,
@@ -621,6 +703,12 @@ export const register: Register = on => {
             .write(`${directory}/${sessionFileName(sessionId)}`, JSON.stringify(snapshot))
             .catch(() => undefined)
           published = { sessionId, key, heartbeat: stamp }
+        }
+
+        if (stamp - historyLoadedAt >= HISTORY_REFRESH_MS) {
+          historyLoadedAt = stamp
+          const past = await loadHistory($, directory, sessionId, stamp)
+          await update($, archive, () => past)
         }
 
         const ownFile = sessionFileName(sessionId)
@@ -779,7 +867,7 @@ export const register: Register = on => {
       return next(e)
     }
     try {
-      const list = await read($, workers)
+      const [list, sessionId] = await Promise.all([read($, workers), read($, currentSessionId)])
       const busy = list.filter(isBusy)
       // The first busy worker holds the right edge until it stops, so the band does
       // not swap mascots as the others change; with none busy, the last one sleeps there.
@@ -794,11 +882,12 @@ export const register: Register = on => {
       )
       const label = isActive && active ? `${money(active.lastCallCost)} · ${active.lastTool || 'thinking'}` : ''
       const roleColor = role ? readableColor(role.color) : undefined
+      const activeName = active && role ? agentName(role.id, active.id) : ''
       const caption =
         isActive && active && role
-          ? `${busy.length} running · ${role.name} · ${clip(active.title, 36)}`
+          ? `${busy.length} running · ${activeName} · ${clip(active.title, 36)}`
           : role
-            ? `${NO_AGENTS_CAPTION} · last: ${role.name}`
+            ? `${NO_AGENTS_CAPTION} · last: ${activeName}`
             : NO_AGENTS_CAPTION
 
       if (e.surface !== 'desktop') {
@@ -817,8 +906,8 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           <Svg
-            source={bandSvg({ roleId: role?.id ?? null, width, isBusy: isActive })}
-            alt={isActive && role ? `Claude passing data to ${role.name}` : 'Claude and its agents, asleep'}
+            source={bandSvg({ roleId: role?.id ?? null, width, isBusy: isActive, mainSeed: sessionId, workerSeed: active?.id ?? '' })}
+            alt={isActive && role ? `Claude passing data to ${activeName}` : 'Claude and its agents, asleep'}
             width={width}
             height={BAND_HEIGHT}
             isInteractive
@@ -849,7 +938,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     try {
       const { Box, Text, Button } = $.ui.resolve(e)
-      const [list, clockNow, mainAgent, activeTab, past, others, title, cwd, sessionId, openState, detailIds] =
+      const [list, clockNow, mainAgent, activeTab, past, others, title, cwd, sessionId, openState, detailIds, sessionTotals] =
         await Promise.all([
           read($, workers),
           read($, now),
@@ -862,20 +951,27 @@ export const register: Register = on => {
           read($, currentSessionId),
           read($, childrenOpen),
           read($, detailOpen),
+          read($, totals),
         ])
       const orchestrator: Worker = { ...mainAgent, title: sessionLabel(title, cwd) }
+      // The main agent is 'main' in every session; its session id varies its character instead.
+      const seedOf = (worker: Worker) => (worker.id === ORCHESTRATOR_ID ? sessionId : worker.id)
       const running = list.filter(isRunning)
       const listIds = new Set(list.map(worker => worker.id))
       const archived = past.filter(worker => !listIds.has(worker.id))
-      const history = [...list, ...archived].sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_ARCHIVED)
+      const history = [...list, ...archived.filter(worker => worker.id !== ORCHESTRATOR_ID)].sort(
+        (a, b) => b.startedAt - a.startedAt,
+      )
       const Svg = e.surface === 'desktop' ? $.ui.resolve(e).Svg : undefined
       const paneWidth = surfaceWidth(e.viewport?.columns, PANE_FALLBACK_PX, PANE_MARGIN_PX)
 
-      const totalCost = list.reduce((sum, worker) => sum + worker.cost, mainAgent.cost)
+      // The official figure when the host keeps one; per-agent costs stay estimates.
+      const totalCost = sessionTotals.usd ?? list.reduce((sum, worker) => sum + worker.cost, mainAgent.cost)
       const totalTokenCount = list.reduce((sum, worker) => sum + worker.tokens, mainAgent.tokens)
       const starts = [clockNow, ...list.map(worker => worker.startedAt)]
       const firstStart = Math.min(...(mainAgent.startedAt > 0 ? [...starts, mainAgent.startedAt] : starts))
-      const clockText = minutes(Math.max(0, Math.round((clockNow - firstStart) / 1000)))
+      const sessionStart = sessionTotals.startedAt > 0 ? sessionTotals.startedAt : firstStart
+      const clockText = formatDuration(clockNow - sessionStart)
 
       const stat = (name: string, value: string) => (
         <Box
@@ -891,13 +987,18 @@ export const register: Register = on => {
         </Box>
       )
 
-      const choose = (next: DashboardTab) => void update($, tab, () => next)
+      // A pressed tab leaves the pane's window parked on the tab row, which kept the stat
+      // tiles above it out of reach; switching tabs takes the window back to the top.
+      const choose = async (next: DashboardTab) => {
+        await update($, tab, () => next)
+        await $.ui.scroll({ in: PANE, to: 'start', block: 'start' }).catch(() => undefined)
+      }
       const tabButton = (id: DashboardTab, label: string, hotkey: string) => (
         <Button
           key={id}
           hotkey={hotkey}
           variant={activeTab === id ? 'primary' : 'secondary'}
-          onPress={() => choose(id)}
+          onPress={() => void choose(id)}
         >
           {label}
         </Button>
@@ -997,15 +1098,17 @@ export const register: Register = on => {
       const card = (worker: Worker, { depth, indent, treeCost, childCount, isTrunkShown }: CardOptions) => {
         const role = roleById(worker.role)
         const roleColor = readableColor(role.color)
+        const seed = seedOf(worker)
+        const name = agentName(role.id, seed)
         const activity = activityOf(worker.status)
         const isDetailed = detailIds.includes(worker.id)
         const files = worker.files.slice(-HISTORY_FILES).map(baseName).join(', ')
         const avatarPx = avatarPxAt(depth)
-        const cardBarWidth = contentWidth(indent, avatarPx)
+        const cardWidth = contentWidth(indent, avatarPx)
         const barColor = isFailed(worker) ? FAILED_BAR_COLOR : roleColor
         const titleChars = Math.min(
           TITLE_CHARS,
-          Math.max(MIN_TITLE_CHARS, Math.floor(cardBarWidth / CELL_PX) - role.name.length - TITLE_RESERVE_CELLS),
+          Math.max(MIN_TITLE_CHARS, Math.floor(cardWidth / CELL_PX) - name.length - TITLE_RESERVE_CELLS),
         )
         const trunkCells = trunkOffset(depth) + 1
 
@@ -1015,8 +1118,8 @@ export const register: Register = on => {
               <Box key="avatar-column" flexDirection="column" flexShrink={0}>
                 {Svg && (
                   <Svg
-                    source={avatarSvg(role.id, activity, avatarPx)}
-                    alt={`${role.category} ${role.name}`}
+                    source={avatarSvg(role.id, activity, avatarPx, seed)}
+                    alt={`${role.category} ${name}`}
                     width={avatarWidth(avatarPx)}
                     height={avatarPx}
                     isInteractive
@@ -1034,7 +1137,7 @@ export const register: Register = on => {
             <Box flexDirection="column" flexGrow={1}>
               <Box flexDirection="row" justifyContent="space-between" gap={1}>
                 <Text bold>
-                  <Text color={roleColor}>{role.name}</Text>
+                  <Text color={roleColor}>{name}</Text>
                   <Text> {clip(worker.title, titleChars)}</Text>
                 </Text>
                 <Box flexDirection="row" gap={1}>
@@ -1044,13 +1147,7 @@ export const register: Register = on => {
                   </Button>
                 </Box>
               </Box>
-              {!isDetailed && (
-                <Text dimColor>
-                  {money(worker.cost)} · {elapsed(worker, clockNow)}
-                </Text>
-              )}
-              {isDetailed && (
-                <Text>
+              <Text>
                   <Text bold color={roleColor}>
                     {role.category}
                   </Text>
@@ -1065,6 +1162,10 @@ export const register: Register = on => {
                     {statusLabel(worker.status)}
                   </Text>
                 </Text>
+              {!isDetailed && (
+                <Text dimColor>
+                  {money(worker.cost)} · {elapsed(worker, clockNow)}
+                </Text>
               )}
               {isDetailed && (
                 <Box flexDirection="row" justifyContent="space-between">
@@ -1072,7 +1173,7 @@ export const register: Register = on => {
                     {worker.tools} tools{worker.lastTool ? ` · ${worker.lastTool}` : ''}
                   </Text>
                   <Text dimColor>
-                    {Math.round(worker.tokens / TOKENS_PER_K)}k · {money(worker.cost)}
+                    {formatCount(worker.tokens)} · {money(worker.cost)}
                     {treeCost === undefined ? '' : ` (${money(treeCost)} incl. sub-agents)`} ·{' '}
                     {elapsed(worker, clockNow)}
                   </Text>
@@ -1081,9 +1182,9 @@ export const register: Register = on => {
               {Svg && (
                 <Box height={BAR_ROW_CELLS} flexShrink={0}>
                   <Svg
-                    source={barSvg(barColor, activity, cardBarWidth, progressElapsedMs(worker, clockNow))}
+                    source={barSvg(barColor, activity, BAR_PX, progressElapsedMs(worker, clockNow))}
                     alt={BAR_ALTS[activity]}
-                    width={barWidth(cardBarWidth)}
+                    width={barWidth(BAR_PX)}
                     height={BAR_ROW_HEIGHT}
                     isInteractive
                   />
@@ -1146,7 +1247,7 @@ export const register: Register = on => {
           <Box key={worker.id} flexDirection="row" justifyContent="space-between" gap={1}>
             <Text>
               <Text bold color={readableColor(role.color)}>
-                {role.name}
+                {agentName(role.id, worker.id)}
               </Text>
               <Text> {clip(worker.title, REMOTE_TITLE_CHARS)}</Text>
             </Text>
@@ -1198,7 +1299,7 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1} width="100%">
           <Box flexDirection="row" gap={1}>
             {stat('Cost', money(totalCost))}
-            {stat('Tokens', `${Math.round(totalTokenCount / TOKENS_PER_K)}k`)}
+            {stat('Tokens', formatCount(totalTokenCount))}
             {stat('Time', clockText)}
           </Box>
           <Box flexDirection="row" gap={1}>
@@ -1206,7 +1307,7 @@ export const register: Register = on => {
             {tabButton('history', `History · ${history.length}`, '2')}
           </Box>
           {remoteSessions.length > 0 && <Text bold>{title ? `This session · ${title}` : 'This session'}</Text>}
-          {agentNode(orchestrator, forest, 0, 0, list.length > 0 ? totalCost : undefined)}
+          {agentNode({ ...orchestrator, cost: totalCost, tokens: totalTokenCount }, forest, 0, 0)}
           {shown.length === 0 && remoteSessions.length === 0 && (
             <Text dimColor>
               {activeTab === 'running' ? 'No workers running.' : 'No agents invoked yet.'}
