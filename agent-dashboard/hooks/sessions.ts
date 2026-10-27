@@ -15,6 +15,10 @@ export const HEARTBEAT_MS = SYNC_MS * 2
 export const STALE_MS = SYNC_MS * 4
 export const MAX_REMOTE_SESSIONS = 20
 export const SESSIONS_SUBDIR = 'agent-dashboard/sessions'
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+/** Sessions whose file was last written longer ago than this drop out of the history. */
+export const HISTORY_DAYS = 60
+export const HISTORY_MS = HISTORY_DAYS * MS_PER_DAY
 
 const FILE_SUFFIX = '.json'
 const PATH_SEPARATORS = /[\\/]/
@@ -126,6 +130,11 @@ export function isSessionFile(name: string): boolean {
   return name.endsWith(FILE_SUFFIX)
 }
 
+/** Whether a session file still belongs to the history window. */
+export function isWithinHistory(mtimeMs: number, clockNow: number): boolean {
+  return clockNow - mtimeMs <= HISTORY_MS
+}
+
 /** Cheap pre-filter on a directory entry, so files of long-gone sessions are never read. */
 export function isFileRecent(mtimeMs: number, clockNow: number): boolean {
   return clockNow - mtimeMs <= STALE_MS
@@ -223,9 +232,16 @@ export function shouldPublish(
 export const SESSION_TITLE_CHARS = 40
 const NON_PROMPT_PREFIXES = ['/', '<']
 
-/** One line of a prompt, clipped to fit a heading. */
+// A list number or bullet the prompt opens with ("1.", "2)", "-") says nothing about it.
+const LEADING_MARKER = /^\s*(?:\d+[.)]|[-*•])\s+/
+const FIRST_SENTENCE = /^(.+?[.!?])(?:\s|$)/
+
+/** The gist of a prompt for a heading: its first sentence, without list markers, clipped. */
 export function promptTitle(prompt: string): string {
-  return clip(prompt.replace(/\s+/g, ' ').trim(), SESSION_TITLE_CHARS)
+  const line = prompt.replace(/\s+/g, ' ').trim().replace(LEADING_MARKER, '')
+  const sentence = FIRST_SENTENCE.exec(line)?.[1] ?? line
+
+  return clip(sentence, SESSION_TITLE_CHARS)
 }
 
 /**
@@ -234,6 +250,13 @@ export function promptTitle(prompt: string): string {
  * Slash commands and injected markup (`<system-reminder>`, notifications) are skipped.
  */
 export function firstPromptTitle(messages: ReadonlyArray<{ role: string; text: string }>): string {
+  const first = firstPrompt(messages)
+
+  return first ? promptTitle(first) : ''
+}
+
+/** The first real prompt of a transcript, whole; '' when there is none yet. */
+export function firstPrompt(messages: ReadonlyArray<{ role: string; text: string }>): string {
   const first = messages.find(message => {
     const body = message.text.trim()
 
@@ -244,7 +267,7 @@ export function firstPromptTitle(messages: ReadonlyArray<{ role: string; text: s
     )
   })
 
-  return first ? promptTitle(first.text) : ''
+  return first?.text.trim() ?? ''
 }
 
 /** What a session section is headed with: its title when known, else its directory's name. */
@@ -256,6 +279,19 @@ export const EARLIER_SESSIONS_LABEL = 'Earlier sessions'
 const SESSION_ROOT_PREFIX = 'session:'
 const LEGACY_SESSION_KEY = 'earlier'
 const SESSION_ID_CHARS = 8
+
+/**
+ * What a past session contributes to the history: its main agent (kept under
+ * its usual id, so groups can tell it apart) and its workers, all tagged with the
+ * session. The heading is the session's title, else the gist of its last answer,
+ * else its directory's name.
+ */
+export function historyEntries(snapshot: SessionSnapshot): ArchivedWorker[] {
+  const label = restoredTitle(snapshot) || promptTitle(snapshot.orchestrator.summary) || snapshot.label
+  const tag = (worker: Worker): ArchivedWorker => ({ ...worker, sessionId: snapshot.sessionId, sessionLabel: label })
+
+  return [tag({ ...snapshot.orchestrator, status: 'completed', endedAt: snapshot.orchestrator.endedAt || snapshot.heartbeat }), ...snapshot.workers.map(tag)]
+}
 
 /** A worker as stored in the history: tagged with the session it ran in, when that is known. */
 export function archiveEntry(worker: Worker, sessionId: string, label: string): ArchivedWorker {
@@ -271,11 +307,15 @@ export type SessionGroup = {
   /** The session id; empty for entries archived before sessions were recorded. */
   key: string
   label: string
+  /** The session's main agent, when its file recorded one. */
+  orchestrator?: ArchivedWorker
   workers: ArchivedWorker[]
 }
 
 const startOf = (group: SessionGroup): number => {
-  const starts = group.workers.map(worker => worker.startedAt).filter(stamp => stamp > 0)
+  const starts = [...group.workers, ...(group.orchestrator ? [group.orchestrator] : [])]
+    .map(worker => worker.startedAt)
+    .filter(stamp => stamp > 0)
 
   return starts.length > 0 ? Math.min(...starts) : 0
 }
@@ -292,8 +332,12 @@ export function pastSessionGroups(entries: ArchivedWorker[], currentSessionId: s
       continue
     }
     const label = key === '' ? EARLIER_SESSIONS_LABEL : entry.sessionLabel || key.slice(0, SESSION_ID_CHARS)
-    const group = groups.get(key) ?? { key, label, workers: [] }
-    group.workers.push(entry)
+    const group: SessionGroup = groups.get(key) ?? { key, label, workers: [] }
+    if (entry.id === ORCHESTRATOR_ID) {
+      group.orchestrator = entry
+    } else {
+      group.workers.push(entry)
+    }
     groups.set(key, group)
   }
 
@@ -310,16 +354,20 @@ export function sessionRootId(group: SessionGroup): string {
   return `${SESSION_ROOT_PREFIX}${group.key || LEGACY_SESSION_KEY}`
 }
 
-/** A lightweight orchestrator for a past session: its workers' totals under the session's label. */
+/** A past session's main agent, totals including its workers, under the session's label. */
 export function pastSessionRoot(group: SessionGroup): Worker {
   const sum = (pick: (worker: Worker) => number) =>
     group.workers.reduce((total, worker) => total + pick(worker), 0)
+  const main = group.orchestrator ?? newOrchestrator(startOf(group))
 
   return {
-    ...newOrchestrator(startOf(group), group.label, sum(worker => worker.cost)),
+    ...main,
+    title: group.label,
     id: sessionRootId(group),
     status: 'completed',
-    tokens: sum(worker => worker.tokens),
-    endedAt: Math.max(0, ...group.workers.map(worker => worker.endedAt)),
+    startedAt: startOf(group),
+    cost: main.cost + sum(worker => worker.cost),
+    tokens: main.tokens + sum(worker => worker.tokens),
+    endedAt: Math.max(main.endedAt, ...group.workers.map(worker => worker.endedAt)),
   }
 }

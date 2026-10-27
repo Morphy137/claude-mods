@@ -53,6 +53,14 @@ export type SessionSnapshot = {
   workers: Worker[]
 }
 
+/** The session's own figures, as /cost and the status line have them. */
+export type SessionTotals = {
+  /** US dollars spent this session; null where the host keeps no cost ledger. */
+  usd: number | null
+  /** When the session began (its first launch, for a resumed one); 0 until known. */
+  startedAt: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-dashboard': {
@@ -78,6 +86,8 @@ declare module 'claude-code' {
       /** Ids of the agents whose card is expanded to full detail; every other card is compact. */
       detailOpen: string[]
       otherSessions: SessionSnapshot[]
+      /** Official cost and start of this session, refreshed with the pane clock. */
+      totals: SessionTotals
     }
   }
 }

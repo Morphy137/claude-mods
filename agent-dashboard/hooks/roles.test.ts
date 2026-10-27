@@ -1,20 +1,29 @@
 import { expect, test } from 'claude-code/testing'
 
-import { ORCHESTRATOR_ROLE_ID, ROLES, classify, roleById } from './roles'
+import { ORCHESTRATOR_ROLE_ID, ROLES, agentName, classify, pickBySeed, roleById } from './roles'
 
 const AGENT_TYPES = ['general-purpose', 'Explore', 'Plan', 'custom-agent', 'x', 'orchestrator', '']
 const TITLES = ['', 'orchestrator Claude conductor', 'review the diff', 'something unrelated', 'main']
-const HAT_ROWS = 6
 
-test('the orchestrator has its own role with a hat and a busy overlay', () => {
+test('the orchestrator has its own role, and every role a pool of ten names', () => {
   const role = roleById(ORCHESTRATOR_ROLE_ID)
 
   expect(role.id).toBe(ORCHESTRATOR_ROLE_ID)
   expect(role.category).toBe('Orchestrator')
-  expect(role.name).toBe('Claude')
   expect(role.keywords).toBeNull()
-  expect(role.hat).not.toBe('')
-  expect(role.overlay).toContain('animateTransform')
+  const all = ROLES.flatMap(each => each.names)
+  for (const each of ROLES) {
+    expect(each.names).toHaveLength(10)
+  }
+  expect(new Set(all).size).toBe(all.length)
+})
+
+test('an agent keeps its name, and different agents spread over the pool', () => {
+  expect(agentName('builder', 'a1')).toBe(agentName('builder', 'a1'))
+  expect(roleById('builder').names).toContain(agentName('builder', 'a1'))
+  const picked = new Set(Array.from({ length: 200 }, (_, index) => agentName('builder', `agent-${index}`)))
+  expect(picked.size).toBe(10)
+  expect(pickBySeed('x', 0)).toBe(0)
 })
 
 test('classify never hands the orchestrator role to a sub-agent', () => {
@@ -28,11 +37,3 @@ test('classify never hands the orchestrator role to a sub-agent', () => {
   }
 })
 
-test('every hat stays within the top rows of the grid', () => {
-  for (const role of ROLES) {
-    const rows = [...role.hat.matchAll(/y="([\d.]+)" width="[\d.]+" height="([\d.]+)"/g)]
-    for (const [, y = '0', height = '0'] of rows) {
-      expect(Number(y) + Number(height)).toBeLessThanOrEqual(HAT_ROWS)
-    }
-  }
-})
